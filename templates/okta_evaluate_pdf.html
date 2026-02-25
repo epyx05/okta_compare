@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OktaEvaluate Security Validation Report</title>
+<style>
+  body { font-family: Arial, sans-serif; color: #1f2937; margin: 24px; }
+  h1 { margin: 0 0 6px; color: #0f1b3d; font-size: 24px; }
+  .meta { margin: 0 0 16px; color: #4b5563; font-size: 12px; }
+  .summary { margin: 0 0 16px; font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: bold; margin-right: 6px; }
+  .result-pass { background: #dcfce7; color: #166534; }
+  .result-warning { background: #fef3c7; color: #92400e; }
+  .result-info { background: #e0f2fe; color: #075985; }
+  .sev-high { background: #fee2e2; color: #991b1b; }
+  .sev-moderate { background: #fef3c7; color: #92400e; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th, td { border: 1px solid #d1d5db; padding: 8px; text-align: left; vertical-align: top; }
+  th { background: #eef3ff; color: #1b2a6b; }
+  ul { margin: 6px 0 0 16px; padding: 0; }
+  li { margin: 2px 0; }
+</style>
+</head>
+<body>
+  <h1>OktaEvaluate Security Validation Report</h1>
+  <p class="meta">{{ evaluation.domain }}{% if evaluation.generated_at %} · Generated {{ evaluation.generated_at }}{% endif %}</p>
+  <p class="summary">Readiness Score: <strong>{{ evaluation.overall_score }}</strong>{% if evaluation.readiness_band %} · Readiness Band: <strong>{{ evaluation.readiness_band }}</strong>{% endif %}</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>What Was Checked</th>
+        <th>Result</th>
+        <th>Severity</th>
+        <th>Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for check in evaluation.security_validations %}
+      <tr>
+        <td><strong>{{ check.title }}</strong></td>
+        <td>
+          <span class="badge result-{{ (check.status or '')|lower }}">{{ check.status }}</span>
+        </td>
+        <td>
+          {% if check.severity %}
+          <span class="badge sev-{{ check.severity|lower }}">{{ check.severity }}</span>
+          {% else %}-{% endif %}
+        </td>
+        <td>
+          <div>{{ check.summary }}</div>
+          {% if check.items %}
+          <ul>
+            {% for item in check.items %}
+            <li>{{ item }}</li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

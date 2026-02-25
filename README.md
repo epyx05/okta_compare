@@ -21,17 +21,54 @@ This repository currently includes multiple utilities under the `OktaVerse` umbr
 Compare configuration between two Okta environments and generate a report + CSV export.
 
 ## Docker
-Build the image:
-```
-docker build -t okta-compare .
+
+You can run `OktaVerse` locally in Docker.
+
+### Prerequisites
+- Docker installed and running
+
+### 1. Build the image
+```bash
+docker build -t oktaverse .
 ```
 
-Run the container:
-```
-docker run --rm -p 5000:5000 okta-compare
+### 2. Run the container
+```bash
+docker run --rm -p 5000:5000 --name oktaverse oktaverse
 ```
 
-Open: `http://localhost:5000`
+### 3. Open the app
+- `http://localhost:5000` (`OktaCompare`)
+- `http://localhost:5000/snapshot` (`OktaSnapshot`)
+- `http://localhost:5000/evaluate` (`OktaEvaluate`)
+- `http://localhost:5000/migrate` (`OktaMigrate`)
+
+### Useful Docker commands
+
+Run in detached mode:
+```bash
+docker run -d --rm -p 5000:5000 --name oktaverse oktaverse
+```
+
+View logs:
+```bash
+docker logs -f oktaverse
+```
+
+Stop the container:
+```bash
+docker stop oktaverse
+```
+
+Use a different host port (example: `8080`):
+```bash
+docker run --rm -p 8080:5000 --name oktaverse oktaverse
+```
+Then open `http://localhost:8080`.
+
+Notes:
+- The app runs on port `5000` inside the container.
+- PDF export (`OktaSnapshot`) is intended to work in Docker because the image installs the required system libraries for `WeasyPrint`.
 
 ## OktaCompare Legend
 - Critical: high-risk mismatch or missing object in an environment.
@@ -41,125 +78,72 @@ Open: `http://localhost:5000`
 
 ## OktaCompare Entities and Compared Parameters
 
-### Groups
-- Keyed by group profile name.
-- Compares: description.
+| Entity | Key / Matching Strategy | Compared Parameters / Notes |
+|---|---|---|
+| Groups | Group profile name | Description |
+| Group Rules | Rule name (group IDs in expressions normalized to group names) | Condition expression |
+| Network Zones | Zone name | Type, gateways, proxies, locations, status |
+| Applications | App label/name | Existence; group assignments only if `compare_group_assignments=True` |
+| Authenticators | Authenticator key/name | Name, type, status |
+| Authenticator Enrollment Policies | Policy name | Rule signature (name, status, priority, conditions, actions); mismatch if any rule differs |
+| Password Policies | Policy name | Rule signature (name, status, priority, conditions, actions); mismatch if any rule differs |
+| App Sign-On Policies | Policy name | Rule signature (name, status, priority, conditions, actions); mismatch if any rule differs |
+| IDP Discovery Policies | Policy name | Rule-by-rule comparison (status, conditions, actions) for matching rule names |
+| Profile Enrollment Policies | Policy name | Rule signature (name, status, priority, conditions, actions); mismatch if any rule differs |
+| Brand Settings | Brand name | Brand properties (`name`, `removePoweredByOkta`, privacy policy fields, `isDefault`) and theme properties (logo/colors/page variants/assets) |
+| Brand Pages | Brand name | Sign-in page `pageContent` HTML; error page settings signature (IDs/links excluded); widget customization diffs logged |
+| Brand Email Templates | Brand name + template name | Customization subject and body/`htmlBody` |
+| Authorization Servers - Settings | Authorization server name | Server settings, claims list, scopes list (IDs/links/timestamps excluded) |
+| Authorization Servers - Access Policies | Authorization server name + policy name | Rule signature (name, status, priority, conditions, actions) |
+| Custom Admin Roles | Role label/name | Role settings signature (IDs/links/timestamps excluded) |
+| Resource Sets | Resource set label/name | Resource set settings signature (IDs/links/timestamps excluded) |
+| Admin Assignments | Set comparison (users/groups/apps) | Admin users (`login/email/displayName/userId`), admin groups (`name/groupId`), admin apps (`displayName/appInstanceId`) |
+| API Tokens | Token name | Network settings |
+| Security General Settings | Sanitized settings object | Threats config, ThreatInsight, security notifications, captcha, user enumeration, user lockout, authenticator settings (IDs/links/timestamps excluded) |
+| Org General Settings | `/api/v1/org` (sanitized) | All fields except `id`, `_links`, `created`, `lastUpdated`, `expiresAt`, `subdomain` |
+| Identity Providers | IdP name | Status, `protocol.type`, sanitized policy |
+| Realms | Realm name/label/displayName | Realm settings signature (IDs/links/timestamps excluded) |
+| Realm Assignments | Assignment name/label/displayName | Status, conditions, actions, domains, `isDefault`, priority |
+| Profile Schema - User | Attribute name | Full user profile attribute settings (base + custom schemas) |
+| Profile Mappings | `source.name -> target.name` (IdP app user mappings only) | Property mappings (`targetField`, source expression, `pushStatus`) |
+| Trusted Origins | Origin name (or URL) | Settings signature (IDs/links/timestamps excluded) |
 
-### Group Rules
-- Keyed by rule name (group IDs in expressions are replaced with group names).
-- Compares: condition expression.
+## OktaSnapshot Extracted Entities
 
-### Network Zones
-- Keyed by zone name.
-- Compares: type, gateways, proxies, locations, status.
-
-### Applications
-- Keyed by app label/name.
-- Compares: existence; group assignments only if `compare_group_assignments=True`.
-
-### Authenticators
-- Keyed by authenticator key/name.
-- Compares: name, type, status.
-
-### Authenticator Enrollment Policies
-- Keyed by policy name.
-- Compares: rule signature (name, status, priority, conditions, actions). Marked mismatch if any rule differs.
-
-### Password Policies
-- Keyed by policy name.
-- Compares: rule signature (name, status, priority, conditions, actions). Marked mismatch if any rule differs.
-
-### App Sign-On Policies
-- Keyed by policy name.
-- Compares: rule signature (name, status, priority, conditions, actions). Marked mismatch if any rule differs.
-
-### IDP Discovery Policies
-- Keyed by policy name.
-- Compares: rule-by-rule (status, conditions, actions) for matching rule names.
-
-### Profile Enrollment Policies
-- Keyed by policy name.
-- Compares: rule signature (name, status, priority, conditions, actions). Marked mismatch if any rule differs.
-
-### Brand Settings
-- Keyed by brand name.
-- Brand properties: name, removePoweredByOkta, customPrivacyPolicyUrl, agreeToCustomPrivacyPolicy, isDefault.
-- Theme properties: backgroundImage, emailTemplateTouchPointVariant, endUserDashboardTouchPointVariant, errorPageTouchPointVariant, favicon, loadingPageTouchPointVariant, logo, primaryColorContrastHex, primaryColorHex, secondaryColorContrastHex, secondaryColorHex, signInPageTouchPointVariant.
-
-### Brand Pages
-- Keyed by brand name.
-- Sign-in page: pageContent HTML.
-- Error page: full settings signature (excluding IDs/links).
-- Note: widget customizations are logged if they differ.
-
-### Brand Email Templates
-- Keyed by brand name and template name.
-- Compares: subject and body/htmlBody of customizations.
-
-### Authorization Servers - Settings
-- Keyed by authorization server name.
-- Compares: server settings, claims list, scopes list (IDs/links/timestamps excluded).
-
-### Authorization Servers - Access Policies
-- Keyed by authorization server name and policy name.
-- Compares: rule signature (name, status, priority, conditions, actions).
-
-### Custom Admin Roles
-- Keyed by role label/name.
-- Compares: role settings signature (IDs/links/timestamps excluded).
-
-### Resource Sets
-- Keyed by resource set label/name.
-- Compares: resource set settings signature (IDs/links/timestamps excluded).
-
-### Admin Assignments
-- Compares three sets:
-  - Admin users (login/email/displayName/userId).
-  - Admin groups (name/groupId).
-  - Admin apps (displayName/appInstanceId).
-
-### API Tokens
-- Keyed by token name.
-- Compares: network settings.
-
-### Security General Settings
-- Compares settings for:
-  - Threats Configuration
-  - ThreatInsight Settings
-  - Security Notifications
-  - Captcha
-  - User Enumeration
-  - User Lockout
-  - Authenticator Settings
-- Comparison uses sanitized settings (IDs/links/timestamps excluded).
-
-### Org General Settings
-- Compares all org settings fields from `/api/v1/org` except: id, _links, created, lastUpdated, expiresAt, subdomain.
-
-### Identity Providers
-- Keyed by IdP name.
-- Compares: status, protocol.type, policy (sanitized).
-
-### Realms
-- Keyed by realm name/label/displayName.
-- Compares: realm settings signature (IDs/links/timestamps excluded).
-
-### Realm Assignments
-- Keyed by assignment name/label/displayName.
-- Compares: status, conditions, actions, domains, isDefault, priority.
-
-### Profile Schema - User
-- Keyed by attribute name.
-- Compares: full attribute settings for the "user" profile (base + custom schemas).
-
-### Profile Mappings
-- Scope: only mappings where source or target is an IdP app user type.
-- Keyed by `source.name -> target.name`.
-- Compares: property mappings (targetField, sourceExpression/expression, pushStatus).
-
-### Trusted Origins
-- Keyed by origin name (or origin URL).
-- Compares: settings signature (IDs/links/timestamps excluded).
+| OktaSnapshot Section | Type | Notes |
+|---|---|---|
+| Organization Settings | Extracted | Key-value settings from org configuration |
+| Security General Settings | Extracted | Security settings rows |
+| Groups | Extracted | Group inventory for snapshot guide/export |
+| Group Rules | Extracted | Rule inventory/details |
+| Network Zones | Extracted | Zone definitions |
+| Identity Providers | Extracted | IdP configurations |
+| Authenticators | Extracted | Authenticator inventory/settings |
+| Authorization Servers - Settings | Extracted | Authorization server settings entries |
+| Authorization Server Claims | Extracted | Claims inventory |
+| Authorization Server Scopes | Extracted | Scopes inventory |
+| Authorization Servers - Access Policies | Extracted | Policies and rules combined in one section (`Entry Type`) |
+| Applications | Extracted | Application inventory/details |
+| Password Policies | Extracted | Policies and rules combined (`Entry Type`) |
+| Global Session Policies | Extracted | Policies and rules combined (`Entry Type`) |
+| Authentication Policies | Extracted | Policies and rules combined (`Entry Type`) |
+| MFA Enrollment Policies | Extracted | Policies and rules combined (`Entry Type`) |
+| IDP Discovery Policies | Extracted | Policies and rules combined (`Entry Type`) |
+| Profile Enrollment Policies | Extracted | Policies and rules combined (`Entry Type`) |
+| Brand Settings | Extracted | Brand/theme settings rows |
+| Brand Pages | Extracted | Brand page content/settings rows |
+| Brand Email Templates | Extracted | Template customization rows |
+| Custom Admin Roles | Extracted | Role definitions |
+| Resource Sets | Extracted | Resource sets, resources, and bindings combined (`Entry Type`) |
+| Admin Assignments - Users | Extracted | Admin user assignments |
+| Admin Assignments - Groups | Extracted | Admin group assignments |
+| Admin Assignments - Apps | Extracted | Admin app assignments |
+| API Tokens | Extracted | Token inventory/settings |
+| Realms | Extracted | Realm definitions |
+| Realm Assignments | Extracted | Realm assignment rows |
+| Profile Schema - User | Extracted | User schema attributes |
+| Profile Mappings | Extracted | Mapping rows (filtered snapshot view) |
+| Trusted Origins | Extracted | Trusted origin rows |
 
 ## OktaCompare Export Behavior
 - Triggered by the “Export Comparison Report” button on the report page.

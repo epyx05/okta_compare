@@ -6,180 +6,339 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css">
 <style>
+  * { box-sizing: border-box; }
   body {
     font-family: 'Space Grotesk', sans-serif;
     background: radial-gradient(1200px 600px at 10% 10%, #e6f0ff 0%, #f3f6fb 60%, #f7f9fc 100%);
-    margin: 0;
-    padding: 0;
-    color: #1f2937;
+    margin: 0; color:#1f2937;
   }
-  .app-shell {
-    display: grid;
-    grid-template-columns: 240px 1fr;
-    min-height: 100vh;
-  }
+  .app-shell { display:grid; grid-template-columns:240px 1fr; min-height:100vh; }
   .sidebar {
     background: linear-gradient(180deg, #1b2a6b 0%, #0f1b3d 100%);
-    color: #dbe7ff;
-    padding: 26px 18px;
-    position: sticky;
-    top: 0;
-    height: 100vh;
-    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06);
+    color:#dbe7ff; padding:26px 18px; position:sticky; top:0; height:100vh; box-shadow: inset -1px 0 0 rgba(255,255,255,0.06);
   }
-  .brand-lockup {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 22px;
-    padding: 10px 12px;
-    background: rgba(255, 255, 255, 0.95);
-    border-radius: 14px;
-    justify-content: center;
-    box-shadow: 0 8px 18px rgba(4, 10, 40, 0.18);
+  .brand-lockup { display:flex; justify-content:center; margin-bottom:22px; padding:10px 12px; background:rgba(255,255,255,0.95); border-radius:14px; box-shadow:0 8px 18px rgba(4,10,40,0.18); }
+  .brand-logo { width:120px; height:auto; }
+  .tool-list { display:flex; flex-direction:column; gap:10px; margin-top:14px; }
+  .tool-button { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-radius:12px; background:rgba(255,255,255,0.08); border:1px solid transparent; color:#dbe7ff; font-size:14px; font-weight:600; text-decoration:none; }
+  .tool-button.active { background:#fff; color:#1b2a6b; border-color:rgba(255,255,255,0.65); box-shadow:0 8px 18px rgba(4,10,40,0.2); }
+  .tool-pill { font-size:11px; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,0.18); color:#fff; font-weight:600; }
+  .tool-button.active .tool-pill { background:rgba(27,42,107,0.15); color:#1b2a6b; }
+  .content { padding:34px 48px 60px; }
+  .page-title { font-size:32px; margin:0 0 6px; color:#0f1b3d; }
+  .page-subtitle { margin:0 0 22px; color:#4b5563; font-size:14px; }
+  .card { background:#fff; border-radius:16px; padding:28px 32px; box-shadow:0 14px 32px rgba(17,24,39,0.08); border:1px solid #eef1f7; margin-bottom:18px; }
+  .guide-form { display:flex; flex-direction:column; gap:18px; }
+  .form-grid { display:grid; grid-template-columns:repeat(2, minmax(260px,1fr)); gap:18px 20px; }
+  .env-card { background:#f8faff; border:1px solid #e3e9f7; border-radius:14px; padding:18px 20px; }
+  h2.section-title-form { color:#1b2a6b; font-size:18px; font-weight:600; margin-bottom:10px; border-left:4px solid #4f7cff; padding-left:10px; margin-top:0; }
+  .grid-2 { display:grid; grid-template-columns:repeat(2, minmax(260px,1fr)); gap:16px 20px; }
+  .field-group { display:flex; flex-direction:column; gap:6px; }
+  label { display:block; margin-top:0; font-weight:500; color:#1b2a6b; font-size:14px; }
+  input[type=text], input[type=password], input[type=number], select {
+    width:100%; padding:12px 14px; margin-top:6px; border:1px solid #d1d5db; border-radius:6px; background:#f9fafb; font-size:14px;
   }
-  .brand-dot {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #ff7a59, #ffb347);
+  input:focus, select:focus { outline:none; border-color:#4f7cff; box-shadow:0 0 0 3px rgba(79,124,255,0.16); background:#fff; }
+  .checkbox-grid { display:grid; grid-template-columns: repeat(2, minmax(180px,1fr)); gap:10px; margin-top:8px; }
+  .checkbox-item { display:flex; align-items:center; gap:8px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; background:#fbfdff; }
+  .checkbox-item input { width:auto; }
+  .checkbox-item.disabled { opacity: 0.55; background:#f5f7fb; }
+  .btn { border:none; background:#1b2a6b; color:#fff; font-weight:600; padding:12px 18px; border-radius:12px; cursor:pointer; margin-top:10px; }
+  .btn:hover { background:#111c4f; }
+  .form-error { display:none; margin-top:12px; padding:12px 14px; border-radius:10px; border:1px solid #fecaca; background:#fef2f2; color:#991b1b; font-size:13px; }
+  .form-error.visible, .form-error.server { display:block; }
+  .input-error { border-color:#dc2626 !important; background:#fff5f5 !important; box-shadow:0 0 0 3px rgba(220,38,38,0.12) !important; }
+  .loader-overlay {
+    position: fixed; inset: 0; background: rgba(0, 17, 34, 0.55); display: none; align-items: center; justify-content: center;
+    z-index: 9999; backdrop-filter: blur(2px);
   }
-  .brand-logo {
-    width: 120px;
-    height: auto;
-    display: block;
+  .loader-card {
+    background: #ffffff; padding: 28px 32px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    text-align: center; min-width: 240px;
   }
-  .brand-title {
-    font-size: 18px;
-    font-weight: 600;
-    color: #ffffff;
-  }
-  .tool-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-top: 14px;
-  }
-  .tool-button {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 14px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid transparent;
-    color: #dbe7ff;
-    font-size: 14px;
-    font-weight: 600;
-    text-decoration: none;
-  }
-  .tool-button.active {
-    background: #ffffff;
-    color: #1b2a6b;
-    border-color: rgba(255, 255, 255, 0.65);
-    box-shadow: 0 8px 18px rgba(4, 10, 40, 0.2);
-  }
-  .tool-pill {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.18);
-    color: #ffffff;
-    font-weight: 600;
-  }
-  .tool-button.active .tool-pill {
-    background: rgba(27, 42, 107, 0.15);
-    color: #1b2a6b;
-  }
-  .content {
-    padding: 34px 48px 60px;
-  }
-  .page-header {
-    margin-bottom: 22px;
-  }
-  .page-title {
-    font-size: 32px;
-    font-weight: 700;
-    color: #0f1b3d;
-    margin: 0 0 6px;
-  }
-  .page-subtitle {
-    margin: 0;
-    color: #4b5563;
-    font-size: 14px;
-  }
-  .card {
-    background: #ffffff;
-    border-radius: 16px;
-    padding: 28px 32px;
-    box-shadow: 0 14px 32px rgba(17, 24, 39, 0.08);
-    border: 1px solid #eef1f7;
-  }
-  .placeholder {
-    display: flex;
-    align-items: center;
-    gap: 18px;
-  }
-  .placeholder svg {
-    width: 64px;
-    height: 64px;
-  }
-  .placeholder h2 {
-    margin: 0 0 6px;
-    font-size: 18px;
-    color: #1b2a6b;
-  }
-  .placeholder p {
-    margin: 0;
-    color: #4b5563;
-    font-size: 14px;
-  }
-  @media (max-width: 900px) {
-    .app-shell {
-      grid-template-columns: 1fr;
-    }
-    .sidebar {
-      position: relative;
-      height: auto;
-    }
-    .content {
-      padding: 28px 20px 40px;
-    }
+  .loader-icon { width: 72px; height: 72px; margin: 0 auto 12px; }
+  .loader-icon .screen { fill: #0b4aa8; }
+  .loader-icon .base { fill: #1f2937; }
+  .loader-icon .dot { fill: #ffffff; animation: pulse 1.2s infinite ease-in-out; }
+  .loader-icon .dot:nth-child(2) { animation-delay: 0.2s; }
+  .loader-icon .dot:nth-child(3) { animation-delay: 0.4s; }
+  .loader-title { font-size: 15px; font-weight: 600; color: #002e5d; margin: 0 0 6px; }
+  .loader-subtitle { font-size: 13px; color: #4b5563; margin: 0; }
+  @keyframes pulse { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+  .summary-grid { display:grid; grid-template-columns:repeat(4, minmax(150px,1fr)); gap:12px; }
+  .summary-card { background:#f8faff; border:1px solid #e3e9f7; border-radius:12px; padding:14px; }
+  .summary-label { font-size:12px; color:#6b7280; text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px; }
+  .summary-value { font-size:18px; font-weight:700; color:#0f1b3d; }
+  .section-title { margin:0 0 12px; color:#1b2a6b; font-size:20px; }
+  .phase-card { border:1px solid #e5e7eb; border-radius:12px; padding:14px; margin-bottom:12px; background:#fff; }
+  .phase-name { font-weight:700; color:#1b2a6b; margin-bottom:4px; }
+  .phase-objective { color:#4b5563; font-size:13px; margin-bottom:8px; }
+  .phase-list, .risk-list, .assumptions { margin:0; padding-left:18px; color:#374151; }
+  .phase-list li, .risk-list li, .assumptions li { margin:6px 0; }
+  .tag-list { display:flex; flex-wrap:wrap; gap:8px; }
+  .tag { font-size:12px; background:#eaf1ff; color:#1b2a6b; padding:4px 8px; border-radius:999px; border:1px solid #d8e5ff; font-weight:600; }
+  .risk-grid { display:grid; grid-template-columns:repeat(2, minmax(280px,1fr)); gap:12px; }
+  .risk-card { border:1px solid #e5e7eb; border-radius:12px; padding:14px; }
+  .risk-header { display:flex; justify-content:space-between; gap:10px; align-items:center; }
+  .risk-name { font-weight:700; color:#1f2937; }
+  .pill { font-size:12px; border-radius:999px; padding:3px 8px; font-weight:600; }
+  .pill.high { background:#fee2e2; color:#991b1b; }
+  .pill.medium { background:#fef3c7; color:#92400e; }
+  .pill.low { background:#dcfce7; color:#166534; }
+  .groups-table-wrap { overflow-x:auto; }
+  .groups-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .groups-table th, .groups-table td { border:1px solid #e5e7eb; padding:10px 12px; text-align:left; vertical-align:top; }
+  .groups-table th { background:#eef3ff; color:#1b2a6b; font-weight:700; }
+  .empty-state { color:#4b5563; font-size:14px; }
+  @media (max-width: 1000px) {
+    .app-shell { grid-template-columns:1fr; }
+    .sidebar { position:relative; height:auto; }
+    .content { padding:28px 20px 40px; }
+    .form-grid, .grid-2, .summary-grid, .risk-grid, .checkbox-grid { grid-template-columns:1fr; }
   }
 </style>
 </head>
 <body>
+<div class="loader-overlay" id="loader">
+  <div class="loader-card">
+    <svg class="loader-icon" viewBox="0 0 120 120" aria-hidden="true">
+      <rect class="screen" x="20" y="18" width="80" height="52" rx="6"></rect>
+      <rect class="base" x="12" y="74" width="96" height="10" rx="4"></rect>
+      <rect class="base" x="32" y="86" width="56" height="10" rx="4"></rect>
+      <circle class="dot" cx="46" cy="44" r="4"></circle>
+      <circle class="dot" cx="60" cy="44" r="4"></circle>
+      <circle class="dot" cx="74" cy="44" r="4"></circle>
+    </svg>
+    <p class="loader-title">OktaMigrate in action</p>
+    <p class="loader-subtitle">Rome wasn’t built in a day... we’re building something even better 😉</p>
+  </div>
+</div>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="brand-lockup">
-      <img class="brand-logo" src="/assets/oktaverse-logo.png" alt="OktaVerse">
-    </div>
+    <div class="brand-lockup"><img class="brand-logo" src="/assets/oktaverse-logo.png" alt="OktaVerse"></div>
     <div class="tool-list">
       <a class="tool-button" href="/">OktaCompare <span class="tool-pill">Live</span></a>
-      <a class="tool-button" href="/snapshot">OktaSnapshot <span class="tool-pill">Beta</span></a>
-      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Soon</span></a>
+      <a class="tool-button" href="/snapshot">OktaSnapshot <span class="tool-pill">Live</span></a>
+      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Beta</span></a>
       <a class="tool-button active" href="/migrate">OktaMigrate <span class="tool-pill">Soon</span></a>
     </div>
   </aside>
   <main class="content">
-    <div class="page-header">
-      <h1 class="page-title">OktaMigrate</h1>
-      <p class="page-subtitle">Plan and orchestrate migrations safely.</p>
-    </div>
+    <h1 class="page-title">OktaMigrate</h1>
+    <p class="page-subtitle">Compare source and target Okta configuration entities, identify missing entities, and migrate selected entities into the target environment.</p>
+
     <section class="card">
-      <div class="placeholder">
-        <svg viewBox="0 0 64 64" aria-hidden="true">
-          <rect x="8" y="14" width="48" height="28" rx="8" fill="#e6ecff"></rect>
-          <path d="M20 48h24" stroke="#1b2a6b" stroke-width="4" stroke-linecap="round"></path>
-          <path d="M24 20h16v16H24z" fill="#4f7cff"></path>
-        </svg>
-        <div>
-          <h2>OktaMigrate is in progress</h2>
-          <p>The migration cockpit is under construction. Check back soon.</p>
+      <form method="POST" id="migrate-form" class="guide-form">
+        <div class="form-grid">
+          <div class="env-card">
+            <h2 class="section-title-form">Source Environment</h2>
+            <div class="field-group">
+              <label for="source_domain">Source Okta Domain</label>
+              <input id="source_domain" name="source_domain" type="text" placeholder="source.okta.com" value="{{ (form_values.get('source_domain') if form_values else '') or '' }}" required>
+            </div>
+            <div class="field-group" style="margin-top: 16px;">
+              <label for="source_token">Source API Token</label>
+              <input id="source_token" name="source_token" type="password" placeholder="Enter source token" required>
+            </div>
+          </div>
+          <div class="env-card">
+            <h2 class="section-title-form">Target Environment</h2>
+            <div class="field-group">
+              <label for="target_domain">Target Okta Domain</label>
+              <input id="target_domain" name="target_domain" type="text" placeholder="target.okta.com" value="{{ (form_values.get('target_domain') if form_values else '') or '' }}" required>
+            </div>
+            <div class="field-group" style="margin-top: 16px;">
+              <label for="target_token">Target API Token</label>
+              <input id="target_token" name="target_token" type="password" placeholder="Enter target token" required>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-grid" style="grid-template-columns: 1fr;">
+          <div class="env-card">
+            <h2 class="section-title-form">Migration Scope</h2>
+            <div class="checkbox-grid">
+              <label class="checkbox-item"><input type="checkbox" name="scope_groups" checked> Groups</label>
+              <label class="checkbox-item disabled"><input type="checkbox" name="scope_apps" disabled> Applications (disabled for demo)</label>
+              <label class="checkbox-item disabled"><input type="checkbox" name="scope_policies" disabled> Policies (disabled for demo)</label>
+              <label class="checkbox-item disabled"><input type="checkbox" name="scope_idp" disabled> Identity Providers (disabled for demo)</label>
+              <label class="checkbox-item disabled"><input type="checkbox" name="scope_branding" disabled> Branding (disabled for demo)</label>
+              <label class="checkbox-item disabled"><input type="checkbox" name="scope_admin" disabled> Admin Delegation (disabled for demo)</label>
+            </div>
+          </div>
+        </div>
+
+        <div id="migrate-form-error" class="form-error{% if form_error %} server visible{% endif %}" role="alert" aria-live="polite">
+          {{ form_error or 'Please provide source and target domains and API tokens to generate a migration plan.' }}
+        </div>
+        <button class="btn" type="submit">Compare for Migration</button>
+      </form>
+    </section>
+
+    {% if migration_plan %}
+    <section class="card">
+      <h2 class="section-title">Groups Migration (Demo Scope)</h2>
+      {% if migration_plan.group_sync %}
+      <div class="summary-grid" style="margin-bottom:12px;">
+        <div class="summary-card"><div class="summary-label">Source Groups</div><div class="summary-value">{{ migration_plan.group_sync.source_count }}</div></div>
+        <div class="summary-card"><div class="summary-label">Target Groups</div><div class="summary-value">{{ migration_plan.group_sync.target_count }}</div></div>
+        <div class="summary-card"><div class="summary-label">Missing in Target</div><div class="summary-value">{{ migration_plan.group_sync.missing|length }}</div></div>
+        <div class="summary-card"><div class="summary-label">Different</div><div class="summary-value">{{ migration_plan.group_sync.different|length }}</div></div>
+      </div>
+      {% if migration_plan.group_update_result %}
+      <div style="margin-bottom:12px; padding:12px 14px; border:1px solid #dbeafe; background:#eff6ff; border-radius:10px; font-size:13px;">
+        <strong>Group Update Result:</strong>
+        Created {{ migration_plan.group_update_result.created|length }}, Updated {{ migration_plan.group_update_result.updated|length }}, Errors {{ migration_plan.group_update_result.errors|length }}.
+        {% if migration_plan.group_update_result.errors %}
+        <ul class="assumptions" style="margin-top:8px;">
+          {% for err in migration_plan.group_update_result.errors %}<li>{{ err }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if migration_plan.group_sync.missing %}
+      <div class="phase-card" style="margin-bottom:12px;">
+        <div class="phase-name">Migrate Missing Groups to Target</div>
+        <div class="phase-objective">Select one or more missing groups and click <strong>Migrate</strong> to create them in the target environment.</div>
+        <form method="POST" action="/migrate/update/groups">
+          <div class="groups-table-wrap">
+            <table class="groups-table">
+              <thead>
+                <tr>
+                  <th style="width:70px;">Select</th>
+                  <th>Group Name</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for g in migration_plan.group_sync.missing %}
+                <tr>
+                  <td><input type="checkbox" name="selected_group_names" value="{{ g.name }}"></td>
+                  <td><strong>{{ g.name }}</strong></td>
+                  <td>{{ g.description or '-' }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <button class="btn" type="submit">Migrate</button>
+        </form>
+      </div>
+      {% else %}
+      <p class="empty-state">No missing groups detected for the selected demo scope.</p>
+      {% endif %}
+
+      <div class="phase-card">
+        <div class="phase-name">All Source Groups (Comparison View)</div>
+        <div class="groups-table-wrap">
+          <table class="groups-table">
+            <thead>
+              <tr>
+                <th>Group Name</th>
+                <th>Status</th>
+                <th>Source Description</th>
+                <th>Target Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for g in migration_plan.group_sync.all_groups %}
+              <tr>
+                <td><strong>{{ g.name }}</strong></td>
+                <td>{{ g.status }}</td>
+                <td>{{ g.source_description or '-' }}</td>
+                <td>{{ g.target_description or '-' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Execution Phases</h2>
+      {% for phase in migration_plan.phases %}
+      <div class="phase-card">
+        <div class="phase-name">{{ phase.phase }}</div>
+        <div class="phase-objective">{{ phase.objective }}</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <div style="font-weight:600; color:#1f2937; font-size:13px; margin-bottom:6px;">Tasks</div>
+            <ul class="phase-list">
+              {% for task in phase.tasks %}<li>{{ task }}</li>{% endfor %}
+            </ul>
+          </div>
+          <div>
+            <div style="font-weight:600; color:#1f2937; font-size:13px; margin-bottom:6px;">Outputs</div>
+            <ul class="phase-list">
+              {% for out in phase.outputs %}<li>{{ out }}</li>{% endfor %}
+            </ul>
+          </div>
         </div>
       </div>
+      {% endfor %}
     </section>
+
+    <section class="card">
+      <h2 class="section-title">Risk Register (Initial)</h2>
+      <div class="risk-grid">
+        {% for risk in migration_plan.risks %}
+        <div class="risk-card">
+          <div class="risk-header">
+            <div class="risk-name">{{ risk.name }}</div>
+            <span class="pill {{ risk.severity|lower }}">{{ risk.severity }}</span>
+          </div>
+          <ul class="risk-list"><li>{{ risk.mitigation }}</li></ul>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Assumptions & Inputs</h2>
+      <ul class="assumptions">
+        {% for line in migration_plan.assumptions %}<li>{{ line }}</li>{% endfor %}
+      </ul>
+    </section>
+    {% else %}
+    <section class="card">
+    </section>
+    {% endif %}
   </main>
 </div>
+<script>
+  const migrateForm = document.getElementById('migrate-form');
+  const loader = document.getElementById('loader');
+  const migrateFormError = document.getElementById('migrate-form-error');
+  const requiredFields = Array.from(migrateForm.querySelectorAll("input[name='source_domain'], input[name='source_token'], input[name='target_domain'], input[name='target_token']"));
+
+  function validateMigrateForm() {
+    let hasError = false;
+    requiredFields.forEach((field) => {
+      const empty = !field.value.trim();
+      field.classList.toggle('input-error', empty);
+      if (empty) hasError = true;
+    });
+    migrateFormError.classList.toggle('visible', hasError);
+    return !hasError;
+  }
+
+  requiredFields.forEach((field) => {
+    field.addEventListener('input', () => {
+      if (field.value.trim()) field.classList.remove('input-error');
+      if (migrateFormError.classList.contains('visible')) validateMigrateForm();
+    });
+  });
+
+  migrateForm.addEventListener('submit', (event) => {
+    if (!validateMigrateForm()) {
+      event.preventDefault();
+      const firstInvalid = requiredFields.find((f) => !f.value.trim());
+      if (firstInvalid) firstInvalid.focus();
+      return;
+    }
+    loader.style.display = 'flex';
+  });
+</script>
 </body>
 </html>

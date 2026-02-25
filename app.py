@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 import requests
 import pandas as pd
 import io
@@ -7,6 +8,7 @@ import csv
 from flask import Flask, session, request, render_template, send_file, send_from_directory, redirect, url_for
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from werkzeug.exceptions import HTTPException
 
 # ----------------------------------------------------
 # Comparison modules
@@ -43,12 +45,22 @@ from modules.oktasnapshot_guide import build_oktasnapshot_guide
 # Extractor modules
 # ----------------------------------------------------
 from scripts.extract_groups import get_groups
+from scripts.extract_applications import get_applications as get_all_applications
 
 app = Flask(__name__)
 app.secret_key = "okta_compare_secret_key"
 LAST_EXPORT = {"diffs": [], "matches": []}
 OKTASNAPSHOT_EXPORT = {"rows": []}
 OKTASNAPSHOT_GUIDE = {"sections": [], "domain": ""}
+OKTAEVALUATE_EXPORT = {"evaluation": None}
+OKTAMIGRATE_EXPORT = {
+    "plan": None,
+    "group_sync": None,
+    "source_domain": "",
+    "source_token": "",
+    "target_domain": "",
+    "target_token": "",
+}
 
 # ---------------------------------------------------
 # Logging
@@ -60,14 +72,849 @@ logging.basicConfig(
 logger = logging.getLogger("okta_compare")
 
 
-# ---------------------------------------------------
-# Defaults
-# ---------------------------------------------------
-DEFAULT_ENV_A_DOMAIN = "haridemo.oktapreview.com"
-DEFAULT_ENV_A_TOKEN  = "00FBlhQJCbNYGpa9WT-LxkDQTgVDlAqd1V2iibjeeH"
+def _section_map(sections):
+    return {section.get("id"): section for section in (sections or [])}
 
-DEFAULT_ENV_B_DOMAIN = "lyraratna.oktapreview.com"
-DEFAULT_ENV_B_TOKEN  = "00mtaZk6K-9APqAykFr1dfvR74oQ-EJmV0d1UdF3mu"
+
+def _ensure_https_domain(domain):
+    return domain if str(domain).startswith(("http://", "https://")) else f"https://{domain}"
+
+
+def _as_dict(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _walk_nested(value, path=""):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            next_path = f"{path}.{key}" if path else str(key)
+            yield from _walk_nested(nested, next_path)
+    elif isinstance(value, list):
+        for idx, nested in enumerate(value):
+            next_path = f"{path}[{idx}]"
+            yield from _walk_nested(nested, next_path)
+    else:
+        yield path, value
+
+
+def _is_deny_action(actions):
+    for path, value in _walk_nested(actions):
+        if isinstance(value, str) and value.strip().lower() == "deny":
+            return True, path
+    for path, value in _walk_nested(actions):
+        if isinstance(value, str) and "deny" in value.strip().lower():
+            return True, path
+    return False, ""
+
+
+def _extract_session_timeout_findings(actions, threshold_minutes=120):
+    findings = []
+    for path, value in _walk_nested(actions):
+        if not isinstance(value, (int, float)):
+            continue
+        p = path.lower()
+        if "session" not in p and "idle" not in p and "lifetime" not in p:
+            continue
+
+        minutes = None
+        unit = None
+        if "minute" in p:
+            minutes = float(value)
+            unit = "minutes"
+        elif "second" in p:
+            minutes = float(value) / 60.0
+            unit = "seconds"
+        elif "hour" in p:
+            minutes = float(value) * 60.0
+            unit = "hours"
+        elif any(k in p for k in ["maxsession", "idle", "lifetime"]):
+            # Fallback heuristic: assume minutes for session timeout-like fields without explicit unit
+            minutes = float(value)
+            unit = "assumed-minutes"
+
+        if minutes is not None and minutes > threshold_minutes:
+            findings.append(
+                {
+                    "path": path,
+                    "value": value,
+                    "unit": unit,
+                    "minutes": round(minutes, 2),
+                }
+            )
+    return findings
+
+
+def _find_setting_value(rows, setting_name):
+    for row in rows or []:
+        if (row.get("Setting") or "").strip().lower() == setting_name.strip().lower():
+            return row.get("Value")
+    return None
+
+
+def _status_from_boolish_enabled(value):
+    if value is None:
+        return "Info"
+    normalized = str(value).strip().lower()
+    if normalized in {"enabled", "yes", "true"}:
+        return "Pass"
+    if normalized in {"disabled", "not enabled", "no", "false"}:
+        return "Warning"
+    return "Info"
+
+
+def _validation(title, status, summary, items=None, severity=None):
+    return {
+        "title": title,
+        "status": status,
+        "severity": severity,
+        "summary": summary,
+        "items": items or [],
+    }
+
+
+def _extract_minutes_from_label(text):
+    if text is None:
+        return None
+    s = str(text).strip().lower()
+    if not s:
+        return None
+    m = re.search(r"(\d+)\s*hour", s)
+    if m:
+        return int(m.group(1)) * 60
+    m = re.search(r"(\d+)\s*minute", s)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _password_policy_weaknesses(policy_row):
+    weaknesses = []
+    complexity = str(policy_row.get("Complexity Settings") or "")
+    age = str(policy_row.get("Age Settings") or "")
+    lockout = str(policy_row.get("Lockout Settings") or "")
+
+    min_len = None
+    m = re.search(r"Minimum length:\s*(\d+)", complexity, re.IGNORECASE)
+    if m:
+        min_len = int(m.group(1))
+        if min_len < 12:
+            weaknesses.append(f"minimum length {min_len} (< 12)")
+
+    for label in ["Lower case letters", "Upper case letters", "Numbers", "Symbols"]:
+        m = re.search(rf"{re.escape(label)}:\s*(\d+)", complexity, re.IGNORECASE)
+        if m and int(m.group(1)) == 0:
+            weaknesses.append(f"{label.lower()} requirement is 0")
+
+    if "Restrict use of common passwords: Disabled" in complexity:
+        weaknesses.append("common password restriction disabled")
+    if "Does not contain part of username: No" in complexity:
+        weaknesses.append("username exclusion disabled")
+
+    min_age = _extract_minutes_from_label(re.search(r"Minimum password age:\s*([^;]+)", age, re.IGNORECASE).group(1)) if re.search(r"Minimum password age:\s*([^;]+)", age, re.IGNORECASE) else None
+    if min_age is not None and min_age == 0:
+        weaknesses.append("minimum password age is 0")
+
+    lockout_attempts = re.search(r"Lock out after failed attempts:\s*(\d+)", lockout, re.IGNORECASE)
+    if lockout_attempts and int(lockout_attempts.group(1)) > 10:
+        weaknesses.append(f"lockout attempts threshold {lockout_attempts.group(1)} (> 10)")
+
+    return weaknesses
+
+
+def _mfa_policy_has_optional_factors(policy_row):
+    settings = _as_dict(policy_row.get("Settings"))
+    for _, value in _walk_nested(settings):
+        if isinstance(value, str) and value.strip().upper() == "OPTIONAL":
+            return True
+    return False
+
+
+def _mfa_policy_weak_factors(policy_row):
+    settings = _as_dict(policy_row.get("Settings"))
+    weak_factor_hits = set()
+    weak_tokens = {
+        "sms": "SMS",
+        "voice": "Voice",
+        "call": "Voice",
+        "security_question": "Security Question",
+        "question": "Security Question",
+        "email": "Email",
+    }
+    for path, value in _walk_nested(settings):
+        p = path.lower()
+        matched = None
+        for token, label in weak_tokens.items():
+            if token in p:
+                matched = label
+                break
+        if not matched:
+            continue
+        if isinstance(value, str):
+            v = value.strip().upper()
+            if v in {"OPTIONAL", "REQUIRED", "ACTIVE", "ENABLED"}:
+                weak_factor_hits.add(matched)
+        elif isinstance(value, bool) and value:
+            weak_factor_hits.add(matched)
+    return sorted(weak_factor_hits)
+
+
+def _run_security_validations(sections, extra_context=None):
+    section_by_id = _section_map(sections)
+    extra_context = extra_context or {}
+    validations = []
+
+    # Validation 1: Catch-all/default rule deny posture in authentication/app sign-on policies
+    auth_section = section_by_id.get("authentication-policies") or {}
+    auth_rows = auth_section.get("rows") or []
+    auth_rule_rows = [r for r in auth_rows if (r.get("Entry Type") == "Rule")]
+
+    policy_map = {}
+    for row in auth_rule_rows:
+        policy_name = row.get("Policy Name") or "Unknown Policy"
+        rule_name = (row.get("Rule Name") or "").strip()
+        if not rule_name:
+            continue
+        bucket = policy_map.setdefault(policy_name, {"catch_all_found": False, "catch_all_denied": False, "details": []})
+        is_catch_all = any(token in rule_name.lower() for token in ["catch", "default", "all"])
+        actions = _as_dict(row.get("Actions"))
+        is_deny, deny_path = _is_deny_action(actions)
+        if is_catch_all:
+            bucket["catch_all_found"] = True
+            if is_deny:
+                bucket["catch_all_denied"] = True
+            bucket["details"].append(
+                {
+                    "rule_name": rule_name,
+                    "status": row.get("Status"),
+                    "deny": is_deny,
+                    "deny_path": deny_path,
+                }
+            )
+
+    missing_or_not_deny = []
+    passing = []
+    for policy_name, result in policy_map.items():
+        if result["catch_all_found"] and result["catch_all_denied"]:
+            passing.append(policy_name)
+        else:
+            missing_or_not_deny.append(
+                {
+                    "policy": policy_name,
+                    "issue": "Catch-all/default rule not found or not set to deny",
+                    "details": result["details"],
+                }
+            )
+
+    if not policy_map:
+        validations.append(_validation(
+            "App Sign-On Policy Catch-All Deny",
+            "Info",
+            "No authentication/app sign-on policy rule data was available to validate catch-all deny posture.",
+            severity="High",
+        ))
+    elif missing_or_not_deny:
+        validations.append(_validation(
+            "App Sign-On Policy Catch-All Deny",
+            "Warning",
+            f"{len(missing_or_not_deny)} policy(s) may not have a catch-all/default deny rule configured.",
+            [f"{item['policy']}: {item['issue']}" for item in missing_or_not_deny],
+            severity="High",
+        ))
+    else:
+        validations.append(_validation(
+            "App Sign-On Policy Catch-All Deny",
+            "Pass",
+            f"Validated catch-all/default deny posture for {len(passing)} authentication/app sign-on policy(ies).",
+            [f"{name}: catch-all/default deny detected" for name in passing[:8]],
+            severity="High",
+        ))
+
+    # Validation 2: Session timeout > 2 hours in global session policies
+    session_section = section_by_id.get("global-session-policies") or {}
+    session_rows = session_section.get("rows") or []
+    session_rule_rows = [r for r in session_rows if r.get("Entry Type") == "Rule"]
+    timeout_violations = []
+    for row in session_rule_rows:
+        actions = _as_dict(row.get("Actions"))
+        for finding in _extract_session_timeout_findings(actions, threshold_minutes=120):
+            timeout_violations.append(
+                {
+                    "policy": row.get("Policy Name") or "Unknown Policy",
+                    "rule": row.get("Rule Name") or "Unnamed Rule",
+                    "path": finding["path"],
+                    "minutes": finding["minutes"],
+                    "raw": f"{finding['value']} ({finding['unit']})",
+                }
+            )
+
+    if not session_rule_rows:
+        validations.append(_validation(
+            "Session Lifetime <= 2 Hours",
+            "Info",
+            "No global session policy rule data was available to validate session timeout settings.",
+            severity="High",
+        ))
+    elif timeout_violations:
+        policy_count = len({(v["policy"]) for v in timeout_violations})
+        validations.append(_validation(
+            "Session Lifetime <= 2 Hours",
+            "Warning",
+            f"Session lifetime duration is more than 2 hours on {policy_count} policy(s).",
+            [
+                f"{v['policy']} / {v['rule']}: {v['path']} = {v['raw']} (~{int(v['minutes'])} min)"
+                for v in timeout_violations[:20]
+            ],
+            severity="High",
+        ))
+    else:
+        validations.append(_validation(
+            "Session Lifetime <= 2 Hours",
+            "Pass",
+            "No session timeout values above 2 hours were detected in global session policy rules.",
+            severity="High",
+        ))
+
+    # Security notifications checks (High)
+    sec_rows = (section_by_id.get("security-settings") or {}).get("rows") or []
+    notification_checks = [
+        ("Password Changed Notifications", "Password changed notification email"),
+        ("Suspicious Activity Reporting for End Users", "Report suspicious activity via email"),
+        ("New Sign-On Notifications", "New sign-on notification email"),
+        ("Factor Enrollment Notifications", "Authenticator enrolled notification email"),
+        ("Factor Reset Notifications", "Authenticator reset notification email"),
+    ]
+    for title, setting_name in notification_checks:
+        value = _find_setting_value(sec_rows, setting_name)
+        status = _status_from_boolish_enabled(value)
+        if status == "Pass":
+            summary = f"{title} are enabled."
+        elif status == "Warning":
+            summary = f"{title} are disabled."
+        else:
+            summary = f"{title} setting was not available in tenant response."
+        validations.append(_validation(title, status, summary, severity="High"))
+
+    # Weak password policies (Moderate)
+    pwd_rows = (section_by_id.get("password-policies") or {}).get("rows") or []
+    pwd_policy_rows = [r for r in pwd_rows if r.get("Entry Type") == "Policy"]
+    weak_pwd = []
+    for row in pwd_policy_rows:
+        weaknesses = _password_policy_weaknesses(row)
+        if weaknesses:
+            weak_pwd.append((row.get("Name") or row.get("Policy Name") or "Unnamed Policy", weaknesses))
+    if not pwd_policy_rows:
+        validations.append(_validation(
+            "Password Policy Strength",
+            "Info",
+            "No password policy data was available for password strength validation.",
+            severity="Moderate",
+        ))
+    elif weak_pwd:
+        validations.append(_validation(
+            "Password Policy Strength",
+            "Warning",
+            f"Password policies for {len(weak_pwd)} policy(s) are weak.",
+            [f"{name}: {', '.join(issues[:3])}" for name, issues in weak_pwd],
+            severity="Moderate",
+        ))
+    else:
+        validations.append(_validation(
+            "Password Policy Strength",
+            "Pass",
+            "No weak password policy patterns were detected using current heuristics.",
+            severity="Moderate",
+        ))
+
+    # Network zones blocklist presence (Moderate)
+    zone_rows = (section_by_id.get("network-zones") or {}).get("rows") or []
+    has_block_zone = any(
+        "block" in str((z.get("Usage") or "")).lower() or "block" in str((z.get("Name") or "")).lower()
+        for z in zone_rows
+    )
+    if not zone_rows:
+        validations.append(_validation(
+            "Blocklisted Network Zone Presence",
+            "Info",
+            "No network zone data was available to validate blocklisted zone configuration.",
+            severity="Moderate",
+        ))
+    elif not has_block_zone:
+        validations.append(_validation(
+            "Blocklisted Network Zone Presence",
+            "Warning",
+            "Network Zones do not contain a block listed zone.",
+            severity="Moderate",
+        ))
+    else:
+        validations.append(_validation(
+            "Blocklisted Network Zone Presence",
+            "Pass",
+            "At least one blocklisted network zone was detected.",
+            severity="Moderate",
+        ))
+
+    # MFA enrollment policies: weaker factors + optional factors
+    mfa_rows = (section_by_id.get("mfa-enrollment-policies") or {}).get("rows") or []
+    mfa_policy_rows = [r for r in mfa_rows if r.get("Entry Type") == "Policy"]
+    weak_factor_policies = []
+    optional_factor_policies = []
+    for row in mfa_policy_rows:
+        name = row.get("Name") or row.get("Policy Name") or "Unnamed Policy"
+        weak_factors = _mfa_policy_weak_factors(row)
+        if weak_factors:
+            weak_factor_policies.append((name, weak_factors))
+        if _mfa_policy_has_optional_factors(row):
+            optional_factor_policies.append(name)
+
+    if not mfa_policy_rows:
+        validations.append(_validation(
+            "Weaker Factors in MFA Enrollment Policies",
+            "Info",
+            "No MFA enrollment policy data was available to evaluate weaker factor usage.",
+            severity="High",
+        ))
+        validations.append(_validation(
+            "Optional Factors in MFA Enrollment Policies",
+            "Info",
+            "No MFA enrollment policy data was available to evaluate optional factor enrollment.",
+            severity="Moderate",
+        ))
+    else:
+        validations.append(_validation(
+            "Weaker Factors in MFA Enrollment Policies",
+            "Warning" if weak_factor_policies else "Pass",
+            (f"Weaker factors are set in {len(weak_factor_policies)} policies."
+             if weak_factor_policies else "No weaker factors detected in MFA enrollment policy settings."),
+            [f"{name}: {', '.join(factors)}" for name, factors in weak_factor_policies[:20]],
+            severity="High",
+        ))
+        validations.append(_validation(
+            "Optional Factors in MFA Enrollment Policies",
+            "Warning" if optional_factor_policies else "Pass",
+            (f"Factors are optional for {len(optional_factor_policies)} Factor Enrollment policies."
+             if optional_factor_policies else "No optional factor enrollment settings detected in MFA enrollment policies."),
+            optional_factor_policies[:20],
+            severity="Moderate",
+        ))
+
+    # SAML apps disabled (High) using full app inventory (including inactive)
+    all_apps = extra_context.get("all_apps") or []
+    if not all_apps:
+        validations.append(_validation(
+            "SAML Authentication Supported but Disabled Apps",
+            "Info",
+            "No full application inventory was available to validate disabled SAML apps.",
+            severity="High",
+        ))
+    else:
+        disabled_saml = [
+            app for app in all_apps
+            if str(app.get("signOnMode") or "").upper() == "SAML_2_0"
+            and str(app.get("status") or "").upper() != "ACTIVE"
+        ]
+        validations.append(_validation(
+            "SAML Authentication Supported but Disabled Apps",
+            "Warning" if disabled_saml else "Pass",
+            (f"SAML authentication is supported but disabled for {len(disabled_saml)} apps."
+             if disabled_saml else "No disabled SAML applications were detected."),
+            [str(app.get("label") or app.get("name") or app.get("id")) for app in disabled_saml[:20]],
+            severity="High",
+        ))
+
+    return validations
+
+
+def _build_evaluate_summary(sections, domain, extra_context=None):
+    section_by_id = _section_map(sections)
+    total_sections = len(sections or [])
+    populated_sections = sum(1 for s in (sections or []) if s.get("rows"))
+    empty_sections = total_sections - populated_sections
+    total_rows = sum(len(s.get("rows") or []) for s in (sections or []))
+
+    readiness_groups = [
+        {
+            "name": "Core Access Controls",
+            "section_ids": [
+                "groups",
+                "group-rules",
+                "network-zones",
+                "authenticators",
+                "password-policies",
+                "global-session-policies",
+                "authentication-policies",
+                "mfa-enrollment-policies",
+            ],
+        },
+        {
+            "name": "Identity Federation",
+            "section_ids": [
+                "identity-providers",
+                "idp-discovery-policies",
+                "profile-mappings",
+            ],
+        },
+        {
+            "name": "Platform Security & Settings",
+            "section_ids": [
+                "org-settings",
+                "security-settings",
+                "trusted-origins",
+            ],
+        },
+        {
+            "name": "Admin Delegation",
+            "section_ids": [
+                "custom-admin-roles",
+                "resource-sets",
+                "admin-assignments-users",
+                "admin-assignments-groups",
+                "admin-assignments-apps",
+            ],
+        },
+        {
+            "name": "Branding & End-User Experience",
+            "section_ids": [
+                "brand-settings",
+                "brand-pages",
+                "brand-email-templates",
+            ],
+        },
+    ]
+
+    group_results = []
+    score_total = 0
+    score_max = 0
+    for group in readiness_groups:
+        items = []
+        present = 0
+        for section_id in group["section_ids"]:
+            section = section_by_id.get(section_id) or {}
+            row_count = len(section.get("rows") or [])
+            has_data = row_count > 0
+            present += int(has_data)
+            items.append(
+                {
+                    "id": section_id,
+                    "title": section.get("title") or section_id,
+                    "row_count": row_count,
+                    "status": "Present" if has_data else "Not Found / Empty",
+                }
+            )
+        total = len(group["section_ids"])
+        pct = round((present / total) * 100) if total else 0
+        score_total += present
+        score_max += total
+        if pct >= 85:
+            risk = "Low"
+        elif pct >= 60:
+            risk = "Medium"
+        else:
+            risk = "High"
+        group_results.append(
+            {
+                "name": group["name"],
+                "present": present,
+                "total": total,
+                "pct": pct,
+                "risk": risk,
+                "items": items,
+            }
+        )
+
+    overall_score = round((score_total / score_max) * 100) if score_max else 0
+    if overall_score >= 85:
+        readiness_band = "Ready"
+    elif overall_score >= 65:
+        readiness_band = "Needs Review"
+    else:
+        readiness_band = "High Attention"
+
+    recommendations = []
+    if empty_sections:
+        recommendations.append(
+            f"{empty_sections} snapshot sections returned no data. Verify API permissions and tenant feature availability."
+        )
+    if overall_score < 85:
+        recommendations.append(
+            "Run OktaCompare against the target environment before cutover to confirm policy, app, and IdP parity."
+        )
+    if not (section_by_id.get("custom-admin-roles") or {}).get("rows"):
+        recommendations.append(
+            "Review admin delegation model manually if custom admin roles/resource sets are not configured in this tenant."
+        )
+    if not (section_by_id.get("brand-pages") or {}).get("rows"):
+        recommendations.append(
+            "Validate end-user branding pages and email templates before go-live if branded experiences are in scope."
+        )
+    if not recommendations:
+        recommendations.append("Tenant configuration coverage looks healthy. Proceed with detailed migration validation.")
+
+    security_validations = _run_security_validations(sections or [], extra_context=extra_context)
+
+    return {
+        "domain": domain,
+        "generated_at": datetime.now(ZoneInfo("Australia/Brisbane")).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "total_sections": total_sections,
+        "populated_sections": populated_sections,
+        "empty_sections": empty_sections,
+        "total_rows": total_rows,
+        "overall_score": overall_score,
+        "readiness_band": readiness_band,
+        "groups": group_results,
+        "security_validations": security_validations,
+        "recommendations": recommendations,
+    }
+
+
+def _build_migration_plan(form_data):
+    source_domain = form_data.get("source_domain", "").strip()
+    target_domain = form_data.get("target_domain", "").strip()
+    in_scope = {
+        "groups": form_data.get("scope_groups") == "on",
+        "apps": form_data.get("scope_apps") == "on",
+        "policies": form_data.get("scope_policies") == "on",
+        "idp": form_data.get("scope_idp") == "on",
+        "branding": form_data.get("scope_branding") == "on",
+        "admin": form_data.get("scope_admin") == "on",
+    }
+
+    scope_labels = []
+    if in_scope["groups"]:
+        scope_labels.append("Groups")
+    if in_scope["apps"]:
+        scope_labels.append("Applications")
+    if in_scope["policies"]:
+        scope_labels.append("Policies")
+    if in_scope["idp"]:
+        scope_labels.append("Identity Providers")
+    if in_scope["branding"]:
+        scope_labels.append("Branding")
+    if in_scope["admin"]:
+        scope_labels.append("Admin Delegation")
+
+    phases = [
+        {
+            "phase": "1. Discovery & Baseline",
+            "objective": "Capture current-state configuration and confirm migration scope.",
+            "tasks": [
+                f"Run OktaSnapshot for source tenant ({source_domain}) and export PDF/DOCX baseline.",
+                "Document in-scope apps, policies, integrations, and business owners.",
+                "Confirm cutover constraints, freeze windows, and rollback expectations.",
+            ],
+            "outputs": ["Source snapshot baseline", "Scope inventory", "Owner map"],
+        },
+        {
+            "phase": "2. Target Readiness",
+            "objective": "Prepare target tenant and validate prerequisite controls.",
+            "tasks": [
+                f"Run OktaSnapshot for target tenant ({target_domain}) to capture starting state.",
+                "Validate org/security settings, trusted origins, authenticator posture, and admin access.",
+                "Define target baseline and naming conventions for migrated objects.",
+            ],
+            "outputs": ["Target readiness checklist", "Target baseline snapshot"],
+        },
+        {
+            "phase": "3. Build / Migration Execution",
+            "objective": "Migrate in-scope configuration in controlled waves.",
+            "tasks": [
+                "Migrate by dependency order (foundational settings -> policies -> apps -> branding).",
+                "Track exceptions, unsupported settings, and manual remediation items.",
+                "Validate each wave with owners before proceeding.",
+            ],
+            "outputs": ["Wave tracker", "Issue log", "Validation sign-offs"],
+        },
+        {
+            "phase": "4. Compare & Validate",
+            "objective": "Confirm parity and identify residual drift before cutover.",
+            "tasks": [
+                f"Run OktaCompare between source ({source_domain}) and target ({target_domain}).",
+                "Review Critical/Medium findings and remediate before cutover approval.",
+                "Export CSV comparison report for approval and audit trail.",
+            ],
+            "outputs": ["Comparison report", "Remediation list", "Cutover readiness decision"],
+        },
+        {
+            "phase": "5. Cutover & Hypercare",
+            "objective": "Execute cutover safely and verify production behavior.",
+            "tasks": [
+                "Execute cutover checklist during approved maintenance window.",
+                "Run post-cutover OktaCompare/OktaSnapshot validation and confirm no unexpected drift.",
+                "Track incidents, user impact, and stabilization actions during hypercare.",
+            ],
+            "outputs": ["Cutover log", "Post-cutover validation", "Hypercare summary"],
+        },
+    ]
+
+    risks = [
+        {
+            "name": "Policy/Rule Drift",
+            "severity": "High" if in_scope["policies"] else "Medium",
+            "mitigation": "Use OktaCompare before cutover and remediate Critical/Medium findings.",
+        },
+        {
+            "name": "App Assignment / Integration Gaps",
+            "severity": "High" if in_scope["apps"] else "Low",
+            "mitigation": "Validate application owners, assignments, and test sign-on flows by wave.",
+        },
+        {
+            "name": "Federation / IdP Differences",
+            "severity": "High" if in_scope["idp"] else "Low",
+            "mitigation": "Validate IdP discovery policies, profile mappings, and routing rules in test flows.",
+        },
+        {
+            "name": "Branding / User Experience Regression",
+            "severity": "Medium" if in_scope["branding"] else "Low",
+            "mitigation": "Snapshot and validate brand pages, email templates, and sign-in UX before go-live.",
+        },
+        {
+            "name": "Admin Access / Operational Readiness",
+            "severity": "Medium" if in_scope["admin"] else "Low",
+            "mitigation": "Confirm admin assignments, roles, and break-glass access in target tenant.",
+        },
+    ]
+
+    workflow_name = "Extract Source -> Compare with Target -> Update Missing/Different"
+
+    assumptions = [
+        f"In scope: {', '.join(scope_labels) if scope_labels else 'No scopes selected (select at least one for a stronger plan).'}",
+    ]
+
+    return {
+        "generated_at": datetime.now(ZoneInfo("Australia/Brisbane")).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "source_domain": source_domain,
+        "target_domain": target_domain,
+        "workflow_name": workflow_name,
+        "in_scope": scope_labels,
+        "phases": phases,
+        "risks": risks,
+        "assumptions": assumptions,
+    }
+
+
+def _build_group_sync_summary(source_groups, target_groups):
+    source_groups = [g for g in (source_groups or []) if str(g.get("type") or "").upper() == "OKTA_GROUP"]
+    target_groups = [g for g in (target_groups or []) if str(g.get("type") or "").upper() == "OKTA_GROUP"]
+
+    src_by_name = {((g.get("profile") or {}).get("name") or ""): g for g in source_groups if (g.get("profile") or {}).get("name")}
+    tgt_by_name = {((g.get("profile") or {}).get("name") or ""): g for g in target_groups if (g.get("profile") or {}).get("name")}
+
+    missing = []
+    different = []
+    matched = 0
+    extra = 0
+    all_groups = []
+
+    for name, src in src_by_name.items():
+        src_profile = src.get("profile") or {}
+        src_desc = src_profile.get("description") or ""
+        tgt = tgt_by_name.get(name)
+        if not tgt:
+            missing.append({
+                "name": name,
+                "description": src_desc,
+            })
+            all_groups.append({
+                "name": name,
+                "source_description": src_desc,
+                "target_description": "",
+                "status": "Missing in Target",
+            })
+            continue
+        tgt_profile = tgt.get("profile") or {}
+        tgt_desc = tgt_profile.get("description") or ""
+        if (src_desc or "") != (tgt_desc or ""):
+            different.append({
+                "name": name,
+                "source_description": src_desc,
+                "target_description": tgt_desc,
+                "target_id": tgt.get("id"),
+            })
+            all_groups.append({
+                "name": name,
+                "source_description": src_desc,
+                "target_description": tgt_desc,
+                "status": "Different",
+            })
+        else:
+            matched += 1
+            all_groups.append({
+                "name": name,
+                "source_description": src_desc,
+                "target_description": tgt_desc,
+                "status": "Match",
+            })
+
+    for name in tgt_by_name:
+        if name not in src_by_name:
+            extra += 1
+            tgt_desc = ((tgt_by_name.get(name) or {}).get("profile") or {}).get("description") or ""
+            all_groups.append({
+                "name": name,
+                "source_description": "",
+                "target_description": tgt_desc,
+                "status": "Extra in Target",
+            })
+
+    all_groups.sort(key=lambda g: ((g.get("name") or "").lower(), g.get("status") or ""))
+
+    return {
+        "source_count": len(src_by_name),
+        "target_count": len(tgt_by_name),
+        "missing": missing,
+        "different": different,
+        "all_groups": all_groups,
+        "matched_count": matched,
+        "extra_count": extra,
+        "pending_count": len(missing) + len(different),
+    }
+
+
+def _okta_headers(api_token):
+    return {
+        "Authorization": f"SSWS {api_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def _create_group(domain, api_token, name, description=""):
+    url = f"{_ensure_https_domain(domain).rstrip('/')}/api/v1/groups"
+    payload = {"profile": {"name": name, "description": description or ""}}
+    return requests.post(url, headers=_okta_headers(api_token), json=payload, timeout=30)
+
+
+def _update_group_description(domain, api_token, group_id, name, description=""):
+    url = f"{_ensure_https_domain(domain).rstrip('/')}/api/v1/groups/{group_id}"
+    payload = {"profile": {"name": name, "description": description or ""}}
+    return requests.put(url, headers=_okta_headers(api_token), json=payload, timeout=30)
+
+
+def _oktaevaluate_csv_bytes(evaluation):
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["What Was Checked", "Result", "Severity", "Summary", "Details"],
+    )
+    writer.writeheader()
+    for check in (evaluation or {}).get("security_validations", []) or []:
+        writer.writerow(
+            {
+                "What Was Checked": check.get("title", ""),
+                "Result": check.get("status", ""),
+                "Severity": check.get("severity", ""),
+                "Summary": check.get("summary", ""),
+                "Details": " | ".join([str(i) for i in (check.get("items") or [])]),
+            }
+        )
+    return output.getvalue().encode("utf-8")
 
 
 # ---------------------------------------------------
@@ -148,12 +995,19 @@ def index():
         # -------------
         # Inputs
         # -------------
-        logger.info("Collecting input values (defaults used if blanks).")
-        envA_domain = request.form.get("envA_domain", "").strip() or DEFAULT_ENV_A_DOMAIN
-        envA_token  = request.form.get("envA_token", "").strip()  or DEFAULT_ENV_A_TOKEN
+        logger.info("Collecting input values.")
+        envA_domain = request.form.get("envA_domain", "").strip()
+        envA_token  = request.form.get("envA_token", "").strip()
+        envB_domain = request.form.get("envB_domain", "").strip()
+        envB_token  = request.form.get("envB_token", "").strip()
 
-        envB_domain = request.form.get("envB_domain", "").strip() or DEFAULT_ENV_B_DOMAIN
-        envB_token  = request.form.get("envB_token", "").strip()  or DEFAULT_ENV_B_TOKEN
+        if not all([envA_domain, envA_token, envB_domain, envB_token]):
+            logger.warning("Missing required comparison inputs.")
+            return render_template(
+                "oktacompare_error.html",
+                title="Missing Required Input",
+                message="Please provide Env A and Env B domains and API tokens.",
+            ), 400
 
 
         # ===================================================
@@ -1430,8 +2284,25 @@ def handle_read_timeout(error):
     ), 504
 
 
+@app.errorhandler(404)
+def handle_not_found(error):
+    logger.warning("Route not found: %s %s", request.method, request.path)
+    return render_template(
+        "oktacompare_error.html",
+        title="Page Not Found",
+        message="The requested page does not exist. Please check the URL and try again.",
+    ), 404
+
+
 @app.errorhandler(Exception)
 def handle_unexpected_error(error):
+    if isinstance(error, HTTPException):
+        logger.warning("HTTP error: %s %s", error.code, error)
+        return render_template(
+            "oktacompare_error.html",
+            title=f"Request Error ({error.code})",
+            message=error.description or "The request could not be completed.",
+        ), error.code
     logger.exception("Unhandled error: %s", error)
     return render_template(
         "oktacompare_error.html",
@@ -1447,8 +2318,16 @@ def oktasnapshot_form():
 
 @app.route("/snapshot", methods=["POST"])
 def oktasnapshot_generate():
-    domain = (request.form.get("domain") or "").strip() or DEFAULT_ENV_A_DOMAIN
-    api_token = (request.form.get("api_token") or "").strip() or DEFAULT_ENV_A_TOKEN
+    domain = (request.form.get("domain") or "").strip()
+    api_token = (request.form.get("api_token") or "").strip()
+
+    if not domain or not api_token:
+        logger.warning("Missing required OktaSnapshot inputs.")
+        return render_template(
+            "oktacompare_error.html",
+            title="Missing Required Input",
+            message="Please provide the Okta domain and API token for OktaSnapshot.",
+        ), 400
 
     logger.info("Generating OktaSnapshot guide for %s.", domain)
     sections, export_rows = build_oktasnapshot_guide(domain, api_token)
@@ -1462,7 +2341,7 @@ def oktasnapshot_generate():
 @app.route("/snapshot/guide", methods=["GET"])
 def oktasnapshot_guide():
     sections = OKTASNAPSHOT_GUIDE.get("sections") or []
-    domain = OKTASNAPSHOT_GUIDE.get("domain") or DEFAULT_ENV_A_DOMAIN
+    domain = OKTASNAPSHOT_GUIDE.get("domain") or ""
     return render_template(
         "oktasnapshot_report.html",
         guide_sections=sections,
@@ -1476,7 +2355,7 @@ def oktasnapshot_guide():
 @app.route("/snapshot/export", methods=["GET"])
 def oktasnapshot_export():
     sections = OKTASNAPSHOT_GUIDE.get("sections") or []
-    domain = OKTASNAPSHOT_GUIDE.get("domain") or DEFAULT_ENV_A_DOMAIN
+    domain = OKTASNAPSHOT_GUIDE.get("domain") or ""
     if not sections:
         logger.warning("No OktaSnapshot guide data found for export.")
     try:
@@ -1558,7 +2437,7 @@ def _docx_set_table_borders(table):
 @app.route("/snapshot/export/docx", methods=["GET"])
 def oktasnapshot_export_docx():
     sections = OKTASNAPSHOT_GUIDE.get("sections") or []
-    domain = OKTASNAPSHOT_GUIDE.get("domain") or DEFAULT_ENV_A_DOMAIN
+    domain = OKTASNAPSHOT_GUIDE.get("domain") or ""
     if not sections:
         logger.warning("No OktaSnapshot guide data found for Word export.")
     try:
@@ -1631,16 +2510,181 @@ def oktasnapshot_export_docx():
     )
 
 
-@app.route("/evaluate", methods=["GET"])
+@app.route("/evaluate", methods=["GET", "POST"])
+@app.route("/validate", methods=["GET", "POST"])
 def okta_evaluate():
-    logger.info("Rendering OktaEvaluate placeholder.")
-    return render_template("okta_evaluate.html")
+    if request.method == "POST":
+        domain = (request.form.get("domain") or "").strip()
+        api_token = (request.form.get("api_token") or "").strip()
+        if not domain or not api_token:
+            return render_template(
+                "okta_evaluate.html",
+                form_error="Please provide the Okta domain and API token before running evaluation.",
+                form_values={"domain": domain},
+            ), 400
+
+        logger.info("Running OktaEvaluate readiness assessment for %s.", domain)
+        sections, _ = build_oktasnapshot_guide(domain, api_token)
+        all_apps = get_all_applications(domain, api_token, limit=200) or []
+        result = _build_evaluate_summary(sections, domain, extra_context={"all_apps": all_apps})
+        OKTAEVALUATE_EXPORT["evaluation"] = result
+        return render_template(
+            "okta_evaluate.html",
+            evaluation=result,
+            form_values={"domain": domain},
+        )
+
+    logger.info("Rendering OktaEvaluate page.")
+    return render_template("okta_evaluate.html", form_values={})
 
 
-@app.route("/migrate", methods=["GET"])
+@app.route("/evaluate/export/csv", methods=["GET"])
+def okta_evaluate_export_csv():
+    evaluation = OKTAEVALUATE_EXPORT.get("evaluation")
+    if not evaluation:
+        logger.warning("No OktaEvaluate data found for CSV export.")
+    return send_file(
+        io.BytesIO(_oktaevaluate_csv_bytes(evaluation or {})),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="oktaevaluate_security_validation_report.csv",
+    )
+
+
+@app.route("/evaluate/export/pdf", methods=["GET"])
+def okta_evaluate_export_pdf():
+    evaluation = OKTAEVALUATE_EXPORT.get("evaluation")
+    if not evaluation:
+        logger.warning("No OktaEvaluate data found for PDF export.")
+    try:
+        from weasyprint import HTML
+    except Exception:
+        logger.exception("WeasyPrint not available for OktaEvaluate PDF export.")
+        return render_template(
+            "oktacompare_error.html",
+            title="PDF Export Unavailable",
+            message="PDF export requires WeasyPrint. Please install it and retry.",
+        ), 500
+
+    html = render_template(
+        "okta_evaluate_pdf.html",
+        evaluation=evaluation or {
+            "domain": "",
+            "generated_at": "",
+            "security_validations": [],
+            "overall_score": "",
+            "readiness_band": "",
+        },
+    )
+    pdf = HTML(string=html).write_pdf()
+    return send_file(
+        io.BytesIO(pdf),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name="oktaevaluate_security_validation_report.pdf",
+    )
+
+
+@app.route("/migrate", methods=["GET", "POST"])
 def okta_migrate():
-    logger.info("Rendering OktaMigrate placeholder.")
-    return render_template("okta_migrate.html")
+    if request.method == "POST":
+        source_domain = (request.form.get("source_domain") or "").strip()
+        source_token = (request.form.get("source_token") or "").strip()
+        target_domain = (request.form.get("target_domain") or "").strip()
+        target_token = (request.form.get("target_token") or "").strip()
+        if not all([source_domain, source_token, target_domain, target_token]):
+            return render_template(
+                "okta_migrate.html",
+                form_error="Please provide source and target domains and API tokens to generate a migration plan.",
+                form_values=request.form,
+            ), 400
+
+        logger.info("Generating OktaMigrate plan for %s -> %s.", source_domain, target_domain)
+        plan = _build_migration_plan(request.form)
+        group_sync = None
+        if request.form.get("scope_groups") == "on":
+            source_groups = get_groups(source_domain, source_token) or []
+            target_groups = get_groups(target_domain, target_token) or []
+            group_sync = _build_group_sync_summary(source_groups, target_groups)
+            OKTAMIGRATE_EXPORT["group_sync"] = group_sync
+            OKTAMIGRATE_EXPORT["source_domain"] = source_domain
+            OKTAMIGRATE_EXPORT["source_token"] = source_token
+            OKTAMIGRATE_EXPORT["target_domain"] = target_domain
+            OKTAMIGRATE_EXPORT["target_token"] = target_token
+        else:
+            OKTAMIGRATE_EXPORT["group_sync"] = None
+            OKTAMIGRATE_EXPORT["source_domain"] = ""
+            OKTAMIGRATE_EXPORT["source_token"] = ""
+            OKTAMIGRATE_EXPORT["target_domain"] = ""
+            OKTAMIGRATE_EXPORT["target_token"] = ""
+        plan["group_sync"] = group_sync
+        OKTAMIGRATE_EXPORT["plan"] = plan
+        return render_template(
+            "okta_migrate.html",
+            migration_plan=plan,
+            form_values=request.form,
+        )
+
+    logger.info("Rendering OktaMigrate page.")
+    return render_template("okta_migrate.html", form_values={})
+
+
+@app.route("/migrate/update/groups", methods=["POST"])
+def okta_migrate_update_groups():
+    plan = OKTAMIGRATE_EXPORT.get("plan")
+    group_sync = OKTAMIGRATE_EXPORT.get("group_sync")
+    source_domain = (OKTAMIGRATE_EXPORT.get("source_domain") or "").strip()
+    source_token = (OKTAMIGRATE_EXPORT.get("source_token") or "").strip()
+    target_domain = (OKTAMIGRATE_EXPORT.get("target_domain") or "").strip()
+    target_token = (OKTAMIGRATE_EXPORT.get("target_token") or "").strip()
+    if not plan or not group_sync or not source_domain or not source_token or not target_domain or not target_token:
+        return render_template(
+            "okta_migrate.html",
+            form_error="No migration group comparison context found. Generate the migration plan again.",
+            form_values={},
+        ), 400
+
+    selected_names = set([n for n in request.form.getlist("selected_group_names") if n])
+    if not selected_names:
+        plan = dict(plan)
+        plan["group_sync"] = group_sync
+        plan["group_update_result"] = {
+            "created": [],
+            "updated": [],
+            "errors": ["No groups selected. Select one or more missing groups and click Migrate."],
+        }
+        return render_template("okta_migrate.html", migration_plan=plan, form_values={}), 400
+
+    action_result = {"created": [], "updated": [], "errors": []}
+
+    missing_by_name = {item.get("name"): item for item in (group_sync.get("missing", []) or [])}
+    for name in selected_names:
+        item = missing_by_name.get(name)
+        if not item:
+            action_result["errors"].append(f"Group '{name}' is not currently marked as missing in target.")
+            continue
+        # Missing list is already filtered to OKTA_GROUP entries via _build_group_sync_summary.
+        resp = _create_group(target_domain, target_token, item.get("name"), item.get("description"))
+        if resp.status_code in (200, 201):
+            action_result["created"].append(item.get("name"))
+        else:
+            action_result["errors"].append(f"Create {item.get('name')}: {resp.status_code} {resp.text[:200]}")
+
+    # Refresh comparison after applying updates
+    source_groups = get_groups(source_domain, source_token) or []
+    target_groups = get_groups(target_domain, target_token) or []
+    refreshed_group_sync = _build_group_sync_summary(source_groups, target_groups)
+    plan = dict(plan)
+    plan["group_sync"] = refreshed_group_sync
+    plan["group_update_result"] = action_result
+    OKTAMIGRATE_EXPORT["plan"] = plan
+    OKTAMIGRATE_EXPORT["group_sync"] = refreshed_group_sync
+
+    return render_template(
+        "okta_migrate.html",
+        migration_plan=plan,
+        form_values={},
+    )
 
 
 @app.route("/assets/<path:filename>")

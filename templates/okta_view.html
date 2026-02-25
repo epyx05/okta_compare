@@ -345,8 +345,8 @@
     </div>
     <div class="tool-list">
       <a class="tool-button" href="/">OktaCompare <span class="tool-pill">Live</span></a>
-      <a class="tool-button active" href="/snapshot">OktaSnapshot <span class="tool-pill">Beta</span></a>
-      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Soon</span></a>
+      <a class="tool-button active" href="/snapshot">OktaSnapshot <span class="tool-pill">Live</span></a>
+      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Beta</span></a>
       <a class="tool-button" href="/migrate">OktaMigrate <span class="tool-pill">Soon</span></a>
     </div>
   </aside>
@@ -363,12 +363,11 @@
             <div class="field-group">
               <label for="domain">Okta Domain</label>
               <input id="domain" name="domain" type="text" placeholder="acme.okta.com" value="{{ guide_domain or '' }}">
-              <span class="field-hint">Enter only the domain, e.g. acme.okta.com (no https://). Leave blank to use the default.</span>
+              <span class="field-hint">Enter only the domain, e.g. acme.okta.com (no https://).</span>
             </div>
             <div class="field-group" style="margin-top: 16px;">
               <label for="api_token">API Token</label>
-              <input id="api_token" name="api_token" type="password" placeholder="Leave blank to use default">
-              <span class="field-hint">Leave blank to use the default token.</span>
+              <input id="api_token" name="api_token" type="password" placeholder="Enter API token">
             </div>
           </div>
         </div>

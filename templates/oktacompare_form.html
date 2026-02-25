@@ -131,7 +131,7 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(260px, 1fr));
         gap: 18px 24px;
-        margin-top: 16px;
+        margin-top: 0;
     }
     .env-card {
         background: #f8faff;
@@ -155,7 +155,7 @@
         margin-bottom: 10px;
         border-left: 4px solid #4f7cff;
         padding-left: 10px;
-        margin-top: 40px;
+        margin-top: 0;
     }
     label {
         display: block;
@@ -181,6 +181,25 @@
         background: #ffffff;
         outline: none;
         box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.16);
+    }
+    .input-error {
+        border-color: #dc2626 !important;
+        background: #fff5f5 !important;
+        box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.12) !important;
+    }
+    .form-error {
+        display: none;
+        margin-top: 8px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid #fecaca;
+        background: #fef2f2;
+        color: #991b1b;
+        font-size: 13px;
+        font-weight: 500;
+    }
+    .form-error.visible {
+        display: block;
     }
     .button-wrapper {
         text-align: center;
@@ -286,7 +305,7 @@
             <circle class="dot" cx="74" cy="44" r="4"></circle>
         </svg>
         <p class="loader-title">OktaCompare in action</p>
-        <p class="loader-subtitle">Wrangling configs... hang tight.</p>
+        <p class="loader-subtitle">Rome wasn’t built in a day... we’re building something even better 😉</p>
     </div>
 </div>
 <div class="app-shell">
@@ -299,10 +318,10 @@
                 OktaCompare <span class="tool-pill">Live</span>
             </a>
             <a class="tool-button" href="/snapshot" role="tab" aria-selected="false">
-                OktaSnapshot <span class="tool-pill">Beta</span>
+                OktaSnapshot <span class="tool-pill">Live</span>
             </a>
             <a class="tool-button" href="/evaluate" role="tab" aria-selected="false">
-                OktaEvaluate <span class="tool-pill">Soon</span>
+                OktaEvaluate <span class="tool-pill">Beta</span>
             </a>
             <a class="tool-button" href="/migrate" role="tab" aria-selected="false">
                 OktaMigrate <span class="tool-pill">Soon</span>
@@ -324,26 +343,29 @@
                         <h2 class="section-title">Environment A</h2>
                         <div class="field-group">
                             <label>Environment A Domain</label>
-                            <input type="text" name="envA_domain" placeholder="{{ defaultA }}">
+                            <input type="text" name="envA_domain" placeholder="acme.okta.com" required>
                             <span class="field-hint">Enter only the domain, e.g. <strong>acme.okta.com</strong> (no https://).</span>
                         </div>
                         <div class="field-group" style="margin-top: 18px;">
                             <label>Environment A API Token</label>
-                            <input type="password" name="envA_token" placeholder="Leave blank to use default">
+                            <input type="password" name="envA_token" placeholder="Enter API token" required>
                         </div>
                     </div>
                     <div class="env-card">
                         <h2 class="section-title">Environment B</h2>
                         <div class="field-group">
                             <label>Environment B Domain</label>
-                            <input type="text" name="envB_domain" placeholder="{{ defaultB }}">
+                            <input type="text" name="envB_domain" placeholder="acme.oktapreview.com" required>
                             <span class="field-hint">Enter only the domain, e.g. <strong>acme.oktapreview.com</strong> (no https://).</span>
                         </div>
                         <div class="field-group" style="margin-top: 18px;">
                             <label>Environment B API Token</label>
-                            <input type="password" name="envB_token" placeholder="Leave blank to use default">
+                            <input type="password" name="envB_token" placeholder="Enter API token" required>
                         </div>
                     </div>
+                </div>
+                <div id="form-error" class="form-error" role="alert" aria-live="polite">
+                    Please fill in all required fields before comparing environments.
                 </div>
 
                 <div class="button-wrapper">
@@ -356,7 +378,40 @@
 <script>
     const form = document.getElementById("compare-form");
     const loader = document.getElementById("loader");
-    form.addEventListener("submit", () => {
+    const formError = document.getElementById("form-error");
+    const requiredFields = Array.from(form.querySelectorAll("input[name='envA_domain'], input[name='envA_token'], input[name='envB_domain'], input[name='envB_token']"));
+
+    function validateCompareForm() {
+        let hasError = false;
+        requiredFields.forEach((field) => {
+            const empty = !field.value.trim();
+            field.classList.toggle("input-error", empty);
+            if (empty) hasError = true;
+        });
+        formError.classList.toggle("visible", hasError);
+        return !hasError;
+    }
+
+    requiredFields.forEach((field) => {
+        field.addEventListener("input", () => {
+            if (field.value.trim()) {
+                field.classList.remove("input-error");
+            }
+            if (formError.classList.contains("visible")) {
+                validateCompareForm();
+            }
+        });
+    });
+
+    form.addEventListener("submit", (event) => {
+        if (!validateCompareForm()) {
+            event.preventDefault();
+            const firstInvalidField = requiredFields.find((field) => !field.value.trim());
+            if (firstInvalidField) {
+                firstInvalidField.focus();
+            }
+            return;
+        }
         loader.style.display = "flex";
     });
 </script>

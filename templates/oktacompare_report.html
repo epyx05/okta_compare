@@ -147,6 +147,30 @@ body {
     gap: 16px;
     margin: 10px 0 30px;
 }
+.severity-legend {
+    margin: 10px 0 18px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid #e5e7eb;
+    background: #f9fbff;
+    color: #374151;
+    font-size: 13px;
+}
+.severity-legend-title {
+    font-weight: 600;
+    color: #1b2a6b;
+    margin-bottom: 6px;
+}
+.severity-legend-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+}
+.severity-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
 .summary-card {
     background: #f4f7ff;
     border-radius: 10px;
@@ -271,10 +295,10 @@ hr {
         OktaCompare <span class="tool-pill">Live</span>
       </a>
       <a class="tool-button" href="/snapshot">
-        OktaSnapshot <span class="tool-pill">Beta</span>
+        OktaSnapshot <span class="tool-pill">Live</span>
       </a>
       <a class="tool-button" href="/evaluate">
-        OktaEvaluate <span class="tool-pill">Soon</span>
+        OktaEvaluate <span class="tool-pill">Beta</span>
       </a>
       <a class="tool-button" href="/migrate">
         OktaMigrate <span class="tool-pill">Soon</span>
@@ -296,6 +320,14 @@ hr {
 
 <!-- SUMMARY GRID -->
 <h3>Summary by Entity</h3>
+<div class="severity-legend" role="note" aria-label="Severity legend">
+  <div class="severity-legend-title">Legend</div>
+  <div class="severity-legend-items">
+    <div class="severity-legend-item"><span>🔴</span><span><strong>Critical</strong>: High-risk mismatch or missing object in an environment.</span></div>
+    <div class="severity-legend-item"><span>🟠</span><span><strong>Medium</strong>: Configuration mismatch for a matched object.</span></div>
+    <div class="severity-legend-item"><span>🟡</span><span><strong>Low</strong>: Extra object found in one environment.</span></div>
+  </div>
+</div>
 <div class="entity-summary-grid">
 
   <!-- Groups -->

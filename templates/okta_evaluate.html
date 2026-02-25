@@ -6,183 +6,273 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css">
 <style>
+  * { box-sizing: border-box; }
   body {
     font-family: 'Space Grotesk', sans-serif;
     background: radial-gradient(1200px 600px at 10% 10%, #e6f0ff 0%, #f3f6fb 60%, #f7f9fc 100%);
     margin: 0;
-    padding: 0;
     color: #1f2937;
   }
-  .app-shell {
-    display: grid;
-    grid-template-columns: 240px 1fr;
-    min-height: 100vh;
-  }
+  .app-shell { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
   .sidebar {
     background: linear-gradient(180deg, #1b2a6b 0%, #0f1b3d 100%);
-    color: #dbe7ff;
-    padding: 26px 18px;
-    position: sticky;
-    top: 0;
-    height: 100vh;
-    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06);
+    color: #dbe7ff; padding: 26px 18px; position: sticky; top: 0; height: 100vh;
+    box-shadow: inset -1px 0 0 rgba(255,255,255,0.06);
   }
   .brand-lockup {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 22px;
-    padding: 10px 12px;
-    background: rgba(255, 255, 255, 0.95);
-    border-radius: 14px;
-    justify-content: center;
-    box-shadow: 0 8px 18px rgba(4, 10, 40, 0.18);
+    display:flex; align-items:center; justify-content:center; margin-bottom:22px; padding:10px 12px;
+    background: rgba(255,255,255,0.95); border-radius:14px; box-shadow: 0 8px 18px rgba(4,10,40,0.18);
   }
-  .brand-dot {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #ff7a59, #ffb347);
-  }
-  .brand-logo {
-    width: 120px;
-    height: auto;
-    display: block;
-  }
-  .brand-title {
-    font-size: 18px;
-    font-weight: 600;
-    color: #ffffff;
-  }
-  .tool-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-top: 14px;
-  }
+  .brand-logo { width:120px; height:auto; display:block; }
+  .tool-list { display:flex; flex-direction:column; gap:10px; margin-top:14px; }
   .tool-button {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 14px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid transparent;
-    color: #dbe7ff;
-    font-size: 14px;
-    font-weight: 600;
-    text-decoration: none;
+    display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-radius:12px;
+    background: rgba(255,255,255,0.08); border:1px solid transparent; color:#dbe7ff; font-size:14px; font-weight:600;
+    text-decoration:none;
   }
-  .tool-button.active {
-    background: #ffffff;
-    color: #1b2a6b;
-    border-color: rgba(255, 255, 255, 0.65);
-    box-shadow: 0 8px 18px rgba(4, 10, 40, 0.2);
-  }
-  .tool-pill {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.18);
-    color: #ffffff;
-    font-weight: 600;
-  }
-  .tool-button.active .tool-pill {
-    background: rgba(27, 42, 107, 0.15);
-    color: #1b2a6b;
-  }
-  .content {
-    padding: 34px 48px 60px;
-  }
-  .page-header {
-    margin-bottom: 22px;
-  }
-  .page-title {
-    font-size: 32px;
-    font-weight: 700;
-    color: #0f1b3d;
-    margin: 0 0 6px;
-  }
-  .page-subtitle {
-    margin: 0;
-    color: #4b5563;
-    font-size: 14px;
-  }
+  .tool-button.active { background:#fff; color:#1b2a6b; border-color: rgba(255,255,255,0.65); box-shadow:0 8px 18px rgba(4,10,40,0.2); }
+  .tool-pill { font-size:11px; padding:2px 8px; border-radius:999px; background: rgba(255,255,255,0.18); color:#fff; font-weight:600; }
+  .tool-button.active .tool-pill { background: rgba(27,42,107,0.15); color:#1b2a6b; }
+  .content { padding: 34px 48px 60px; }
+  .page-header { margin-bottom: 22px; }
+  .page-title { font-size:32px; font-weight:700; color:#0f1b3d; margin:0 0 6px; }
+  .page-subtitle { margin:0; color:#4b5563; font-size:14px; }
   .card {
-    background: #ffffff;
-    border-radius: 16px;
-    padding: 28px 32px;
-    box-shadow: 0 14px 32px rgba(17, 24, 39, 0.08);
-    border: 1px solid #eef1f7;
+    background:#fff; border-radius:16px; padding:28px 32px; box-shadow:0 14px 32px rgba(17,24,39,0.08); border:1px solid #eef1f7;
+    margin-bottom: 18px;
   }
-  .placeholder {
-    display: flex;
-    align-items: center;
-    gap: 18px;
+  .guide-form { display:flex; flex-direction:column; gap:18px; }
+  .form-grid { display:grid; grid-template-columns: 1fr; gap:18px; }
+  .env-card { background:#f8faff; border:1px solid #e3e9f7; border-radius:14px; padding:18px 20px; }
+  h2.section-title {
+    color:#1b2a6b; font-size:18px; font-weight:600; margin-bottom:10px;
+    border-left:4px solid #4f7cff; padding-left:10px; margin-top:0;
   }
-  .placeholder svg {
-    width: 64px;
-    height: 64px;
+  .field-group { display:flex; flex-direction:column; gap:6px; }
+  label { display:block; margin-top:0; font-weight:500; color:#1b2a6b; font-size:14px; }
+  input[type=text], input[type=password] {
+    width:100%; padding:12px 14px; margin-top:6px; border:1px solid #d1d5db; border-radius:6px; background:#f9fafb; font-size:14px;
   }
-  .placeholder h2 {
-    margin: 0 0 6px;
-    font-size: 18px;
-    color: #1b2a6b;
+  input:focus { outline:none; border-color:#4f7cff; box-shadow:0 0 0 3px rgba(79,124,255,0.16); background:#fff; }
+  .field-hint { font-size:12px; color:#6b7280; }
+  .primary-button {
+    border:none; background:#1b2a6b; color:#fff; font-weight:600; padding:12px 18px; border-radius:12px; cursor:pointer;
+    box-shadow:0 10px 20px rgba(27,42,107,0.2); margin-top: 8px;
   }
-  .placeholder p {
-    margin: 0;
-    color: #4b5563;
-    font-size: 14px;
+  .primary-button:hover { background:#111c4f; }
+  .form-error {
+    display:none; margin-top:12px; padding:12px 14px; border-radius:10px; border:1px solid #fecaca; background:#fef2f2; color:#991b1b; font-size:13px;
   }
-  @media (max-width: 900px) {
-    .app-shell {
-      grid-template-columns: 1fr;
-    }
-    .sidebar {
-      position: relative;
-      height: auto;
-    }
-    .content {
-      padding: 28px 20px 40px;
-    }
+  .form-error.visible, .form-error.server { display:block; }
+  .input-error { border-color:#dc2626 !important; background:#fff5f5 !important; box-shadow:0 0 0 3px rgba(220,38,38,0.12) !important; }
+  .loader-overlay {
+    position: fixed; inset: 0; background: rgba(0, 17, 34, 0.55); display: none; align-items: center; justify-content: center;
+    z-index: 9999; backdrop-filter: blur(2px);
+  }
+  .loader-card {
+    background: #ffffff; padding: 28px 32px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    text-align: center; min-width: 240px;
+  }
+  .loader-icon { width: 72px; height: 72px; margin: 0 auto 12px; }
+  .loader-icon .screen { fill: #0b4aa8; }
+  .loader-icon .base { fill: #1f2937; }
+  .loader-icon .dot { fill: #ffffff; animation: pulse 1.2s infinite ease-in-out; }
+  .loader-icon .dot:nth-child(2) { animation-delay: 0.2s; }
+  .loader-icon .dot:nth-child(3) { animation-delay: 0.4s; }
+  .loader-title { font-size: 15px; font-weight: 600; color: #002e5d; margin: 0 0 6px; }
+  .loader-subtitle { font-size: 13px; color: #4b5563; margin: 0; }
+  @keyframes pulse { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+  .hero-stats { display:grid; grid-template-columns: repeat(4, minmax(140px,1fr)); gap:12px; }
+  .stat-card { background:#f8faff; border:1px solid #e3e9f7; border-radius:12px; padding:14px; }
+  .stat-label { color:#6b7280; font-size:12px; text-transform: uppercase; letter-spacing:0.04em; margin-bottom:6px; }
+  .stat-value { font-size:24px; font-weight:700; color:#0f1b3d; }
+  .band-ready { color:#15803d; }
+  .band-review { color:#b45309; }
+  .band-attention { color:#b91c1c; }
+  .group-grid { display:grid; grid-template-columns: repeat(2, minmax(280px,1fr)); gap:14px; }
+  .group-card { border:1px solid #e5e7eb; border-radius:12px; padding:14px; background:#fff; }
+  .group-header { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
+  .group-title { font-weight:700; color:#1b2a6b; }
+  .pill { font-size:12px; border-radius:999px; padding:3px 8px; font-weight:600; }
+  .pill.low { background:#dcfce7; color:#166534; }
+  .pill.medium { background:#fef3c7; color:#92400e; }
+  .pill.high { background:#fee2e2; color:#991b1b; }
+  .pill.pass { background:#dcfce7; color:#166534; }
+  .pill.warning { background:#fef3c7; color:#92400e; }
+  .pill.info { background:#e0f2fe; color:#075985; }
+  .pill.severity-high { background:#fee2e2; color:#991b1b; }
+  .pill.severity-moderate { background:#fef3c7; color:#92400e; }
+  .mini-list { margin:0; padding-left:18px; color:#4b5563; font-size:13px; }
+  .mini-list li { margin:4px 0; }
+  .recommendations { margin:0; padding-left:18px; }
+  .recommendations li { margin:8px 0; color:#374151; }
+  .report-table-wrap { overflow-x:auto; }
+  .report-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .report-table th, .report-table td { border:1px solid #e5e7eb; padding:10px 12px; vertical-align:top; text-align:left; }
+  .report-table th { background:#eef3ff; color:#1b2a6b; font-weight:700; }
+  .check-name { font-weight:700; color:#1f2937; min-width:260px; }
+  .details-list { margin:0; padding-left:18px; color:#4b5563; }
+  .details-list li { margin:4px 0; }
+  .empty-state { color:#4b5563; font-size:14px; }
+  @media (max-width: 1000px) {
+    .app-shell { grid-template-columns: 1fr; }
+    .sidebar { position:relative; height:auto; }
+    .content { padding: 28px 20px 40px; }
+    .form-grid, .hero-stats, .group-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
 <body>
+<div class="loader-overlay" id="loader">
+  <div class="loader-card">
+    <svg class="loader-icon" viewBox="0 0 120 120" aria-hidden="true">
+      <rect class="screen" x="20" y="18" width="80" height="52" rx="6"></rect>
+      <rect class="base" x="12" y="74" width="96" height="10" rx="4"></rect>
+      <rect class="base" x="32" y="86" width="56" height="10" rx="4"></rect>
+      <circle class="dot" cx="46" cy="44" r="4"></circle>
+      <circle class="dot" cx="60" cy="44" r="4"></circle>
+      <circle class="dot" cx="74" cy="44" r="4"></circle>
+    </svg>
+    <p class="loader-title">OktaEvaluate in action</p>
+    <p class="loader-subtitle">Rome wasn’t built in a day... we’re building something even better 😉</p>
+  </div>
+</div>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="brand-lockup">
-      <img class="brand-logo" src="/assets/oktaverse-logo.png" alt="OktaVerse">
-    </div>
+    <div class="brand-lockup"><img class="brand-logo" src="/assets/oktaverse-logo.png" alt="OktaVerse"></div>
     <div class="tool-list">
       <a class="tool-button" href="/">OktaCompare <span class="tool-pill">Live</span></a>
-      <a class="tool-button" href="/snapshot">OktaSnapshot <span class="tool-pill">Beta</span></a>
-      <a class="tool-button active" href="/evaluate">OktaEvaluate <span class="tool-pill">Soon</span></a>
+      <a class="tool-button" href="/snapshot">OktaSnapshot <span class="tool-pill">Live</span></a>
+      <a class="tool-button active" href="/evaluate">OktaEvaluate <span class="tool-pill">Beta</span></a>
       <a class="tool-button" href="/migrate">OktaMigrate <span class="tool-pill">Soon</span></a>
     </div>
   </aside>
   <main class="content">
     <div class="page-header">
       <h1 class="page-title">OktaEvaluate</h1>
-      <p class="page-subtitle">Readiness checks and drift analysis with guided insights.</p>
+      <p class="page-subtitle">Security assessment for tenant configuration validation and control checks.</p>
     </div>
+
+    {% if not evaluation %}
     <section class="card">
-      <div class="placeholder">
-        <svg viewBox="0 0 64 64" aria-hidden="true">
-          <rect x="10" y="14" width="44" height="36" rx="8" fill="#e6ecff"></rect>
-          <path d="M20 38l8-10 6 6 10-12" stroke="#4f7cff" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
-          <circle cx="20" cy="38" r="3" fill="#1b2a6b"></circle>
-          <circle cx="28" cy="28" r="3" fill="#1b2a6b"></circle>
-          <circle cx="34" cy="34" r="3" fill="#1b2a6b"></circle>
-          <circle cx="44" cy="22" r="3" fill="#1b2a6b"></circle>
-        </svg>
+      <form method="POST" id="evaluate-form" class="guide-form">
+        <div class="form-grid">
+          <div class="env-card">
+            <h2 class="section-title">OktaEvaluate Environment</h2>
+            <div class="field-group">
+              <label for="domain">Okta Domain</label>
+              <input id="domain" name="domain" type="text" placeholder="acme.okta.com" value="{{ (form_values.get('domain') if form_values else '') or '' }}" required>
+              <span class="field-hint">Enter the domain only (no https://).</span>
+            </div>
+            <div class="field-group" style="margin-top: 16px;">
+              <label for="api_token">API Token</label>
+              <input id="api_token" name="api_token" type="password" placeholder="Enter API token" required>
+              <span class="field-hint">Used to run a live readiness assessment from tenant configuration data.</span>
+            </div>
+          </div>
+        </div>
+        <div id="evaluate-form-error" class="form-error{% if form_error %} server visible{% endif %}" role="alert" aria-live="polite">
+          {{ form_error or 'Please provide the Okta domain and API token before running evaluation.' }}
+        </div>
+        <button class="primary-button" type="submit">Evaluate Environment</button>
+      </form>
+    </section>
+    {% endif %}
+
+    {% if evaluation %}
+    <section class="card">
+      <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
         <div>
-          <h2>OktaEvaluate is in progress</h2>
-          <p>The scoring engine is warming up. Check back soon.</p>
+          <h2 style="margin:0; color:#1b2a6b; font-size:20px;">Security Validation Checks</h2>
+          <p class="page-subtitle">{{ evaluation.domain }} · Generated {{ evaluation.generated_at }}</p>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="primary-button" type="button" onclick="window.location.href='/evaluate/export/csv'">Export CSV</button>
         </div>
       </div>
+      <div class="page-subtitle" style="margin-bottom:10px;">This report lists what was checked, the result, and severity for each validation.</div>
+      <div class="report-table-wrap">
+        <table class="report-table">
+          <thead>
+            <tr>
+              <th>What Was Checked</th>
+              <th>Result</th>
+              <th>Severity</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+        {% for check in evaluation.security_validations %}
+            <tr>
+              <td class="check-name">{{ check.title }}</td>
+              <td>
+                <span class="pill {{ check.status|lower }}">{{ check.status }}</span>
+              </td>
+              <td>
+                {% if check.severity %}
+                <span class="pill severity-{{ check.severity|lower }}">{{ check.severity }}</span>
+                {% else %}
+                <span style="color:#6b7280;">-</span>
+                {% endif %}
+              </td>
+              <td>
+                <div style="color:#4b5563; margin-bottom:{% if check['items'] %}6px{% else %}0{% endif %};">{{ check.summary }}</div>
+                {% if check["items"] %}
+                <ul class="details-list">
+                  {% for item in check["items"] %}
+                  <li>{{ item }}</li>
+                  {% endfor %}
+                </ul>
+                {% endif %}
+              </td>
+            </tr>
+        {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </section>
+    {% else %}
+    <section class="card">
+      <p class="empty-state">Run a security assessment to generate the tenant security validation report.</p>
+    </section>
+    {% endif %}
   </main>
 </div>
+<script>
+  const form = document.getElementById('evaluate-form');
+  const loader = document.getElementById('loader');
+  if (form) {
+    const formError = document.getElementById('evaluate-form-error');
+    const fields = Array.from(form.querySelectorAll("input[name='domain'], input[name='api_token']"));
+
+    function validateEvaluateForm() {
+      let hasError = false;
+      fields.forEach((field) => {
+        const empty = !field.value.trim();
+        field.classList.toggle('input-error', empty);
+        if (empty) hasError = true;
+      });
+      formError.classList.toggle('visible', hasError);
+      return !hasError;
+    }
+
+    fields.forEach((field) => {
+      field.addEventListener('input', () => {
+        if (field.value.trim()) field.classList.remove('input-error');
+        if (formError.classList.contains('visible')) validateEvaluateForm();
+      });
+    });
+
+    form.addEventListener('submit', (event) => {
+      if (!validateEvaluateForm()) {
+        event.preventDefault();
+        const firstInvalid = fields.find((f) => !f.value.trim());
+        if (firstInvalid) firstInvalid.focus();
+        return;
+      }
+      loader.style.display = 'flex';
+    });
+  }
+</script>
 </body>
 </html>

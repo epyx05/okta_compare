@@ -167,6 +167,25 @@
     outline: none;
     box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.16);
   }
+  .input-error {
+    border-color: #dc2626 !important;
+    background: #fff5f5 !important;
+    box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.12) !important;
+  }
+  .form-error {
+    display: none;
+    margin-top: 8px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid #fecaca;
+    background: #fef2f2;
+    color: #991b1b;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .form-error.visible {
+    display: block;
+  }
   .primary-button {
     border: none;
     background: #1b2a6b;
@@ -263,8 +282,8 @@
     </div>
     <div class="tool-list">
       <a class="tool-button" href="/">OktaCompare <span class="tool-pill">Live</span></a>
-      <a class="tool-button active" href="/snapshot">OktaSnapshot <span class="tool-pill">Beta</span></a>
-      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Soon</span></a>
+      <a class="tool-button active" href="/snapshot">OktaSnapshot <span class="tool-pill">Live</span></a>
+      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Beta</span></a>
       <a class="tool-button" href="/migrate">OktaMigrate <span class="tool-pill">Soon</span></a>
     </div>
   </aside>
@@ -280,15 +299,17 @@
             <h2 class="section-title">OktaSnapshot Environment</h2>
             <div class="field-group">
               <label for="domain">Okta Domain</label>
-              <input id="domain" name="domain" type="text" placeholder="acme.okta.com">
-              <span class="field-hint">Enter only the domain, e.g. acme.okta.com (no https://). Leave blank to use the default.</span>
+              <input id="domain" name="domain" type="text" placeholder="acme.okta.com" required>
+              <span class="field-hint">Enter only the domain, e.g. acme.okta.com (no https://).</span>
             </div>
             <div class="field-group" style="margin-top: 16px;">
               <label for="api_token">API Token</label>
-              <input id="api_token" name="api_token" type="password" placeholder="Leave blank to use default">
-              <span class="field-hint">Leave blank to use the default token.</span>
+              <input id="api_token" name="api_token" type="password" placeholder="Enter API token" required>
             </div>
           </div>
+        </div>
+        <div id="snapshot-form-error" class="form-error" role="alert" aria-live="polite">
+          Please fill in the Okta domain and API token before generating the guide.
         </div>
         <button class="primary-button" type="submit">Generate Guide</button>
       </form>
@@ -299,8 +320,41 @@
 <script>
   const viewForm = document.getElementById("oktasnapshot-form");
   const viewLoader = document.getElementById("loader");
+  const snapshotFormError = document.getElementById("snapshot-form-error");
   if (viewForm && viewLoader) {
-    viewForm.addEventListener("submit", () => {
+    const snapshotFields = Array.from(viewForm.querySelectorAll("input[name='domain'], input[name='api_token']"));
+
+    function validateSnapshotForm() {
+      let hasError = false;
+      snapshotFields.forEach((field) => {
+        const empty = !field.value.trim();
+        field.classList.toggle("input-error", empty);
+        if (empty) hasError = true;
+      });
+      snapshotFormError.classList.toggle("visible", hasError);
+      return !hasError;
+    }
+
+    snapshotFields.forEach((field) => {
+      field.addEventListener("input", () => {
+        if (field.value.trim()) {
+          field.classList.remove("input-error");
+        }
+        if (snapshotFormError.classList.contains("visible")) {
+          validateSnapshotForm();
+        }
+      });
+    });
+
+    viewForm.addEventListener("submit", (event) => {
+      if (!validateSnapshotForm()) {
+        event.preventDefault();
+        const firstInvalidField = snapshotFields.find((field) => !field.value.trim());
+        if (firstInvalidField) {
+          firstInvalidField.focus();
+        }
+        return;
+      }
       viewLoader.style.display = "flex";
     });
   }

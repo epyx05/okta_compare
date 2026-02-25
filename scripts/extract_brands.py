@@ -19,7 +19,10 @@ def _ensure_domain_str(domain_url):
 def _get_json(url, headers, error_label):
     resp = requests.get(url, headers=headers)
     if resp.status_code != 200:
-        logger.error("%s: %s %s", error_label, resp.status_code, resp.text)
+        if resp.status_code == 404:
+            logger.info("%s: %s %s", error_label, resp.status_code, resp.text)
+        else:
+            logger.error("%s: %s %s", error_label, resp.status_code, resp.text)
         return None, resp
     try:
         return resp.json(), resp

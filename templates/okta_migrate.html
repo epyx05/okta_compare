@@ -119,7 +119,7 @@
     <div class="tool-list">
       <a class="tool-button" href="/">OktaCompare <span class="tool-pill">Live</span></a>
       <a class="tool-button" href="/snapshot">OktaSnapshot <span class="tool-pill">Live</span></a>
-      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Beta</span></a>
+      <a class="tool-button" href="/evaluate">OktaEvaluate <span class="tool-pill">Soon</span></a>
       <a class="tool-button active" href="/migrate">OktaMigrate <span class="tool-pill">Soon</span></a>
     </div>
   </aside>
@@ -255,51 +255,6 @@
       {% endif %}
     </section>
 
-    <section class="card">
-      <h2 class="section-title">Execution Phases</h2>
-      {% for phase in migration_plan.phases %}
-      <div class="phase-card">
-        <div class="phase-name">{{ phase.phase }}</div>
-        <div class="phase-objective">{{ phase.objective }}</div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-          <div>
-            <div style="font-weight:600; color:#1f2937; font-size:13px; margin-bottom:6px;">Tasks</div>
-            <ul class="phase-list">
-              {% for task in phase.tasks %}<li>{{ task }}</li>{% endfor %}
-            </ul>
-          </div>
-          <div>
-            <div style="font-weight:600; color:#1f2937; font-size:13px; margin-bottom:6px;">Outputs</div>
-            <ul class="phase-list">
-              {% for out in phase.outputs %}<li>{{ out }}</li>{% endfor %}
-            </ul>
-          </div>
-        </div>
-      </div>
-      {% endfor %}
-    </section>
-
-    <section class="card">
-      <h2 class="section-title">Risk Register (Initial)</h2>
-      <div class="risk-grid">
-        {% for risk in migration_plan.risks %}
-        <div class="risk-card">
-          <div class="risk-header">
-            <div class="risk-name">{{ risk.name }}</div>
-            <span class="pill {{ risk.severity|lower }}">{{ risk.severity }}</span>
-          </div>
-          <ul class="risk-list"><li>{{ risk.mitigation }}</li></ul>
-        </div>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="card">
-      <h2 class="section-title">Assumptions & Inputs</h2>
-      <ul class="assumptions">
-        {% for line in migration_plan.assumptions %}<li>{{ line }}</li>{% endfor %}
-      </ul>
-    </section>
     {% else %}
     <section class="card">
     </section>

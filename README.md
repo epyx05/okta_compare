@@ -6,15 +6,15 @@ This repository currently includes multiple utilities under the `OktaVerse` umbr
 
 - `OktaCompare`: Compare configuration between two Okta environments and generate a report + CSV export.
 - `OktaSnapshot`: Capture and export a structured snapshot of a single Okta org's configuration.
-- `OktaEvaluate`: Assessment/readiness utility (currently a placeholder page in this codebase).
-- `OktaMigrate`: Migration workflow utility (currently a placeholder page in this codebase).
+- `OktaEvaluate`: Tenant security assessment utility with validation checks and exportable reports.
+- `OktaMigrate`: Migration utility for comparing entities and migrating selected missing entities (current demo scope: Groups).
 
 ## OktaVerse Structure
 
 - `OktaCompare` (`/`): Main comparison workflow with report generation and CSV exports.
 - `OktaSnapshot` (`/snapshot`): Snapshot guide generation with PDF and DOCX export support.
-- `OktaEvaluate` (`/evaluate`): Placeholder route for evaluation workflows.
-- `OktaMigrate` (`/migrate`): Placeholder route for migration workflows.
+- `OktaEvaluate` (`/evaluate`, `/validate`): Security assessment workflow with CSV/PDF export support.
+- `OktaMigrate` (`/migrate`): Compare-and-migrate workflow (demo scope currently enabled for Groups).
 
 ## OktaCompare
 
@@ -144,6 +144,50 @@ Notes:
 | Profile Schema - User | Extracted | User schema attributes |
 | Profile Mappings | Extracted | Mapping rows (filtered snapshot view) |
 | Trusted Origins | Extracted | Trusted origin rows |
+
+## OktaEvaluate
+
+Perform tenant security assessment checks and generate an exportable validation report.
+
+### Key Capabilities
+
+- Runs tenant-level security validation checks using live Okta configuration data.
+- Produces a structured report with: `What Was Checked`, `Result`, `Severity`, and `Details`.
+- Flags high/moderate security gaps across notifications, policies, session settings, factors, and apps.
+- Exports the assessment report as CSV (PDF route is also available in the app).
+
+### Current Coverage
+
+| Check Area | Example Checks | Severity |
+|---|---|---|
+| App Sign-On / Authentication Policies | Catch-all/default deny posture | High |
+| Session Security | Session lifetime exceeds recommended 2 hours | High |
+| Security Notifications | Password changed, suspicious activity, sign-on, factor enrollment/reset notifications | High |
+| MFA / Factor Enrollment | Weaker factors configured; optional factors in factor enrollment policies | High / Moderate |
+| Password Policies | Weak password policy heuristics (complexity/lockout/common passwords) | Moderate |
+| Network Zones | Presence of blocklisted zone | Moderate |
+| Applications | SAML-supported apps that are disabled | High |
+
+## OktaMigrate
+
+Compare source and target Okta configuration entities, identify missing entities, and migrate selected entities into the target environment.
+
+### Key Capabilities
+
+- Compares source and target environments for migration-oriented entity gaps.
+- Presents missing entities for selection and targeted migration into the target tenant.
+- Includes migration execution guidance sections: `Execution Phases`, `Risk Register (Initial)`, `Assumptions & Inputs`.
+- Supports selective entity migration actions (current demo scope: `Groups`).
+
+### Current Demo Scope (Groups)
+
+| Capability | Behavior |
+|---|---|
+| Entity Scope | `Groups` selectable; other entities shown but disabled for demo |
+| Comparison | Lists all source groups and identifies missing groups in target |
+| Selection | Checkbox per missing group |
+| Migration Action | `Migrate` button creates selected missing groups in target via Okta API |
+| Group Type Filter | Only `OKTA_GROUP` groups are listed and created |
 
 ## OktaCompare Export Behavior
 - Triggered by the “Export Comparison Report” button on the report page.

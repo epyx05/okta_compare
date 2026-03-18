@@ -20,7 +20,8 @@ def _get_json(url, headers, error_label):
     resp = requests.get(url, headers=headers)
     if resp.status_code != 200:
         if resp.status_code == 404:
-            logger.info("%s: %s %s", error_label, resp.status_code, resp.text)
+            label = str(error_label).replace("Error fetching ", "").strip()
+            logger.warning("%s not found: %s %s", label, resp.status_code, resp.text)
         else:
             logger.error("%s: %s %s", error_label, resp.status_code, resp.text)
         return None, resp

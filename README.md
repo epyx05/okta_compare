@@ -227,8 +227,9 @@ Perform tenant security assessment checks and generate an exportable validation 
 ### Key Capabilities
 
 - Runs tenant-level security validation checks using live Okta configuration data.
+- Uses both tenant configuration data and user/admin/token metadata where supported by Okta management APIs.
 - Produces a structured report with: `What Was Checked`, `Result`, `Severity`, and `Details`.
-- Flags high/moderate security gaps across notifications, policies, session settings, factors, and apps.
+- Flags security gaps across configuration, policy, provisioning, hooks, admin governance, and account-level risk posture.
 - Exports the assessment report as CSV (PDF route is also available in the app).
 
 ### Current Coverage
@@ -241,7 +242,54 @@ Perform tenant security assessment checks and generate an exportable validation 
 | MFA / Factor Enrollment | Weaker factors configured; optional factors in factor enrollment policies | High / Moderate |
 | Password Policies | Weak password policy heuristics (complexity/lockout/common passwords) | Moderate |
 | Network Zones | Presence of blocklisted zone | Moderate |
-| Applications | SAML-supported apps that are disabled | High |
+| Applications | Missing access policy, Everyone assignment, password-based/SWA sign-on modes, disabled SAML apps | High / Moderate / Low |
+| Hooks / Trusted Origins | Unverified hooks, hooks without auth scheme, inactive hooks, insecure trusted origins | High / Moderate |
+| Admin Governance | Super admin exposure, unused custom admin roles, resource sets without bindings/resources, admin public client applications | High / Moderate / Low |
+| Risk / Threat Controls | ThreatInsight blocking, attack-protection settings not enforcing, entity-risk and identity-threat-policy coverage | High |
+| Identity Risks (Users / Admins / Tokens) | No MFA, pending MFA, old password, unused accounts, SSO bypass/direct access, super admins with API tokens, unrotated API tokens, partially off-boarded users, unused custom admin roles | High / Moderate / Low |
+
+Notes:
+- OktaEvaluate includes HealthInsight-aligned and ISPM-inspired checks where they are reasonably measurable from native Okta management APIs.
+- Checks that couldn't be supported defensibly from native Okta API data were removed rather than shown as placeholder informational findings.
+- Some policy checks are heuristics based on extracted policy rule conditions and actions, especially around MFA every sign-in and direct-access posture.
+
+### Entity-Based Checks
+
+| Entity | OktaEvaluate Checks |
+|---|---|
+| Organization Settings | Organization support metadata completeness |
+| Security General Settings | Password changed notifications, suspicious activity reporting, new sign-on notifications, factor enrollment notifications, factor reset notifications |
+| Groups | Groups missing description |
+| Group Rules | Disabled group rules, group rules without target assignment |
+| Network Zones | Blocklisted network zone presence, inactive network zones, trusted network zones without entries |
+| Applications | Applications assigned to Everyone, password-based/SWA sign-on modes, disabled SAML applications |
+| Authenticators | Weak authenticators enabled, phishing-resistant authenticator availability |
+| MFA Enrollment Policies | Weaker factors in MFA enrollment policies, optional factors in MFA enrollment policies, required authenticator coverage |
+| Password Policies | Password policy strength |
+| Global Session Policies | Session lifetime less than or equal to 2 hours, high-risk/new-device MFA every sign-in heuristics |
+| Authentication Policies | Catch-all/default deny, tenant-wide MFA enforcement heuristics, high-risk/new-device MFA every sign-in heuristics, Admin Console MFA every sign-in heuristic |
+| Entity Risk Policies | Active entity risk policy rule coverage |
+| Identity Threat Protection Policies | Active identity threat protection policy rule coverage |
+| Identity Providers | Inactive identity providers, inactive IdP discovery rules |
+| Authorization Servers | Authorization servers without automatic key rotation, authorization server access rules with broad client scope |
+| Custom Admin Roles | Custom admin roles missing description, unused administrative roles |
+| Resource Sets | Resource sets without resources, resource sets without bindings |
+| Admin Assignments | Group-based admin assignments present, admin public client applications present, super admin count checks, admin/user inactivity checks |
+| API Tokens | Super admin with API token, unrotated keys and tokens, unused keys and tokens, tokens owned by inactive users, network restriction checks |
+| Brand Settings | Brands missing custom privacy policy URL |
+| Brand Email Templates | Email templates missing subject or body |
+| Trusted Origins | Insecure trusted origins (`http://`) |
+| Event Hooks | Unverified event hooks, event hooks without authentication scheme, inactive event hooks |
+| Inline Hooks | Inline hooks without authentication scheme, inactive inline hooks |
+| Access Controls - Attack Protection | Attack protection controls not enforcing, ThreatInsight blocking posture |
+| Realms | Inactive realms, realm default assignment coverage |
+| Profile Schema - User | Sensitive writable profile attributes |
+| Profile Mappings | Empty profile mappings |
+| Group Push Mappings | Inactive group push mappings, stale group push mappings |
+| Users / Accounts | No MFA, pending MFA, no MFA enforced, old password, unused account, partially off-boarded user, SSO bypass/direct access |
+| Admin Accounts | No MFA, pending MFA, old password, unused admin accounts, direct access, old-password/no-MFA/unused toxic combinations |
+| Super Admin Accounts | No MFA, pending MFA, old password, unused global admin accounts, super admin with API token |
+| Potential Service Accounts | Old password, unused account, console access, admin service-account variants |
 
 ## OktaMigrate
 

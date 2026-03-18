@@ -6,7 +6,7 @@ import pandas as pd
 import io
 import csv
 from flask import Flask, session, request, render_template, send_file, send_from_directory, redirect, url_for
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from werkzeug.exceptions import HTTPException
 
@@ -52,6 +52,13 @@ from modules.oktasnapshot_guide import build_oktasnapshot_guide
 # ----------------------------------------------------
 from scripts.extract_groups import get_groups
 from scripts.extract_applications import get_applications as get_all_applications
+from scripts.extract_users import get_users_with_security_context
+from scripts.extract_api_tokens import get_api_tokens_with_metadata
+from scripts.extract_admin_roles import (
+    get_custom_admin_roles,
+    get_resource_sets,
+    get_resource_set_bindings,
+)
 
 app = Flask(__name__)
 app.secret_key = "okta_compare_secret_key"
@@ -172,7 +179,7 @@ def _status_from_boolish_enabled(value):
     if normalized in {"enabled", "yes", "true"}:
         return "Pass"
     if normalized in {"disabled", "not enabled", "no", "false"}:
-        return "Warning"
+        return "Fail"
     return "Info"
 
 
@@ -228,6 +235,10 @@ def _password_policy_weaknesses(policy_row):
     if min_age is not None and min_age == 0:
         weaknesses.append("minimum password age is 0")
 
+    history_count = re.search(r"Enforce password history \(count\):\s*(\d+)", age, re.IGNORECASE)
+    if history_count and int(history_count.group(1)) < 24:
+        weaknesses.append(f"password history {history_count.group(1)} (< 24)")
+
     lockout_attempts = re.search(r"Lock out after failed attempts:\s*(\d+)", lockout, re.IGNORECASE)
     if lockout_attempts and int(lockout_attempts.group(1)) > 10:
         weaknesses.append(f"lockout attempts threshold {lockout_attempts.group(1)} (> 10)")
@@ -270,6 +281,371 @@ def _mfa_policy_weak_factors(policy_row):
         elif isinstance(value, bool) and value:
             weak_factor_hits.add(matched)
     return sorted(weak_factor_hits)
+
+
+def _section_rows(section_by_id, section_id, entry_type=None):
+    rows = (section_by_id.get(section_id) or {}).get("rows") or []
+    if entry_type is None:
+        return rows
+    return [row for row in rows if str(row.get("Entry Type") or "").strip() == entry_type]
+
+
+def _row_map(rows, key_field="Setting", value_field="Value"):
+    mapping = {}
+    for row in rows or []:
+        key = row.get(key_field)
+        if key:
+            mapping[str(key)] = row.get(value_field)
+    return mapping
+
+
+def _blankish(value):
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == "" or value.strip().lower() in {"not available", "none", "null"}
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) == 0
+    return False
+
+
+def _text(value):
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return str(value or "")
+
+
+def _contains_token(value, tokens):
+    haystack = _text(value).lower()
+    return any(token.lower() in haystack for token in tokens)
+
+
+def _looks_like_inactive(status):
+    return str(status or "").strip().upper() not in {"ACTIVE", "ENABLED", "VERIFIED"}
+
+
+def _parse_iso_datetime(value):
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _days_since(value):
+    parsed = _parse_iso_datetime(value)
+    if not parsed:
+        return None
+    return (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).days
+
+
+def _user_display_name(user):
+    profile = user.get("profile") or {}
+    display_name = (profile.get("displayName") or "").strip()
+    if display_name:
+        return display_name
+    full_name = " ".join(
+        part.strip()
+        for part in [profile.get("firstName") or "", profile.get("lastName") or ""]
+        if str(part).strip()
+    ).strip()
+    if full_name:
+        return full_name
+    return str(profile.get("login") or user.get("id") or "Unknown User")
+
+
+def _user_identifier(user):
+    profile = user.get("profile") or {}
+    login = profile.get("login") or profile.get("email") or user.get("id") or "Unknown User"
+    display_name = _user_display_name(user)
+    if display_name and display_name != login:
+        return f"{login} ({display_name})"
+    return str(login)
+
+
+def _user_provider_type(user):
+    credentials = user.get("credentials") or {}
+    provider = credentials.get("provider") or {}
+    return str(provider.get("type") or "").strip().upper()
+
+
+def _user_role_types(user):
+    role_types = set()
+    for role in user.get("roles") or []:
+        role_type = str(role.get("type") or role.get("label") or role.get("name") or "").strip().upper()
+        if role_type:
+            role_types.add(role_type)
+    return role_types
+
+
+def _active_factor_types(user):
+    factor_types = set()
+    for factor in user.get("factors") or []:
+        status = str(factor.get("status") or "").strip().upper()
+        if status != "ACTIVE":
+            continue
+        factor_type = str(factor.get("factorType") or factor.get("factor") or "").strip()
+        provider = str(factor.get("provider") or "").strip()
+        label = f"{factor_type} ({provider})" if provider else factor_type
+        if label:
+            factor_types.add(label)
+    return factor_types
+
+
+def _pending_factor_types(user):
+    factor_types = set()
+    for factor in user.get("factors") or []:
+        status = str(factor.get("status") or "").strip().upper()
+        if status not in {"PENDING", "PENDING_ACTIVATION"}:
+            continue
+        factor_type = str(factor.get("factorType") or factor.get("factor") or "").strip()
+        provider = str(factor.get("provider") or "").strip()
+        label = f"{factor_type} ({provider})" if provider else factor_type
+        if label:
+            factor_types.add(label)
+    return factor_types
+
+
+def _has_mfa(user):
+    return bool(_active_factor_types(user))
+
+
+def _has_pending_mfa(user):
+    return (not _has_mfa(user)) and bool(_pending_factor_types(user))
+
+
+def _is_direct_access_user(user):
+    provider_type = _user_provider_type(user)
+    if provider_type in {"FEDERATION", "SOCIAL"}:
+        return False
+    if provider_type:
+        return True
+    return bool((user.get("credentials") or {}).get("password"))
+
+
+def _is_service_account(user, active_token_count=0):
+    profile = user.get("profile") or {}
+    searchable = " ".join(
+        str(value or "")
+        for value in [
+            profile.get("login"),
+            profile.get("email"),
+            profile.get("displayName"),
+            profile.get("firstName"),
+            profile.get("lastName"),
+            profile.get("title"),
+            profile.get("department"),
+        ]
+    ).lower()
+    patterns = [
+        r"(^|[\W_])(svc|service|bot|automation|api|daemon|integration|system|noreply|nonhuman|robot)([\W_]|$)",
+        r"(^|[\W_])(ci|cd|etl|job)([\W_]|$)",
+    ]
+    if any(re.search(pattern, searchable) for pattern in patterns):
+        return True
+    if active_token_count > 0 and not str(profile.get("firstName") or "").strip() and not str(profile.get("lastName") or "").strip():
+        return True
+    return False
+
+
+def _is_unused_user(user, threshold_days=91):
+    status = str(user.get("status") or "").strip().upper()
+    if status not in {"ACTIVE", "PROVISIONED", "RECOVERY", "LOCKED_OUT", "PASSWORD_EXPIRED", "STAGED"}:
+        return False
+    days_since_last_login = _days_since(user.get("lastLogin"))
+    if days_since_last_login is not None:
+        return days_since_last_login >= threshold_days
+    created_or_activated_days = _days_since(user.get("activated")) or _days_since(user.get("created"))
+    return created_or_activated_days is not None and created_or_activated_days >= threshold_days
+
+
+def _has_old_password(user, threshold_days=90):
+    if _user_provider_type(user) in {"FEDERATION", "SOCIAL"}:
+        return False
+    age_days = _days_since(user.get("passwordChanged"))
+    return age_days is not None and age_days >= threshold_days
+
+
+def _token_rotation_age_days(token):
+    for candidate in [token.get("lastUpdated"), token.get("created")]:
+        days = _days_since(candidate)
+        if days is not None:
+            return days
+    return None
+
+
+def _is_active_token(token):
+    return str(token.get("status") or "").strip().upper() == "ACTIVE"
+
+
+def _token_name(token):
+    return str(token.get("name") or token.get("label") or token.get("id") or "Unknown Token")
+
+
+def _token_inventory(tokens):
+    active_by_user = {}
+    for token in tokens or []:
+        if not _is_active_token(token):
+            continue
+        user_id = token.get("userId")
+        if not user_id:
+            continue
+        active_by_user.setdefault(user_id, []).append(token)
+    return active_by_user
+
+
+def _token_findings_for_user(user_tokens, owner_unused=False, rotation_days=90):
+    unrotated = []
+    unused = []
+    for token in user_tokens or []:
+        age_days = _token_rotation_age_days(token)
+        if age_days is not None and age_days >= rotation_days:
+            unrotated.append((token, age_days))
+        if owner_unused:
+            unused.append(token)
+    return unrotated, unused
+
+
+def _format_token_item(user, token, suffix=None):
+    base = f"{_user_identifier(user)}: {_token_name(token)}"
+    if suffix:
+        return f"{base} ({suffix})"
+    return base
+
+
+def _role_binding_keys(binding_role):
+    keys = set()
+    if isinstance(binding_role, dict):
+        for value in [binding_role.get("id"), binding_role.get("type"), binding_role.get("label"), binding_role.get("name")]:
+            if value:
+                keys.add(str(value).strip())
+                keys.add(str(value).strip().upper())
+    elif binding_role:
+        keys.add(str(binding_role).strip())
+        keys.add(str(binding_role).strip().upper())
+    return keys
+
+
+def _custom_role_usage_map(custom_roles, resource_set_bindings):
+    usage = {}
+    for role in custom_roles or []:
+        keys = set()
+        for value in [role.get("id"), role.get("label"), role.get("name")]:
+            if value:
+                keys.add(str(value).strip())
+                keys.add(str(value).strip().upper())
+        usage[str(role.get("id") or role.get("label") or role.get("name") or "")] = {
+            "role": role,
+            "keys": keys,
+            "used": False,
+        }
+
+    for binding in resource_set_bindings or []:
+        binding_keys = _role_binding_keys(binding.get("role"))
+        if not binding_keys:
+            continue
+        for role_usage in usage.values():
+            if role_usage["keys"] & binding_keys:
+                role_usage["used"] = True
+
+    return usage
+
+
+def _actions_reference_mfa(actions):
+    positive_strings = {
+        "mfa",
+        "multifactor",
+        "promptforfactor",
+        "phishing_resistant",
+        "authenticator",
+        "factor",
+        "password / idp + another factor",
+    }
+    positive_paths = {"mfa", "factor", "authenticator", "challenge"}
+    for path, value in _walk_nested(actions):
+        path_l = path.lower()
+        value_l = str(value).strip().lower()
+        if any(token in path_l for token in positive_paths):
+            return True
+        if any(token in value_l for token in positive_strings):
+            return True
+    return False
+
+
+def _actions_reference_every_sign_in(actions):
+    positive_values = {
+        "every sign in",
+        "every sign-in",
+        "every sign-in attempt",
+        "at every sign in",
+        "at every sign-in",
+        "always",
+        "every_time",
+        "everytime",
+        "per_session",
+    }
+    for path, value in _walk_nested(actions):
+        path_l = path.lower()
+        value_l = str(value).strip().lower()
+        if any(token in path_l for token in ["prompt", "reauth", "factorlifetime", "mfalifetime"]):
+            if any(token in value_l for token in positive_values):
+                return True
+        if any(token in value_l for token in positive_values):
+            return True
+    return False
+
+
+def _conditions_reference_new_device(conditions):
+    return _contains_token(conditions, ["new device", "new_device", "behavior", "device"])
+
+
+def _conditions_reference_high_risk(conditions):
+    return _contains_token(conditions, ['"high"', "risk", "high"])
+
+
+def _policy_has_required_authenticator(policy_row):
+    settings = _as_dict(policy_row.get("Settings"))
+    for _, value in _walk_nested(settings):
+        if isinstance(value, str) and value.strip().upper() == "REQUIRED":
+            return True
+    return False
+
+
+def _tenant_mfa_enforcement_gaps(section_by_id):
+    mfa_rows = (section_by_id.get("mfa-enrollment-policies") or {}).get("rows") or []
+    auth_rows = (section_by_id.get("authentication-policies") or {}).get("rows") or []
+    mfa_policy_rows = [r for r in mfa_rows if r.get("Entry Type") == "Policy"]
+    auth_rule_rows = [r for r in auth_rows if r.get("Entry Type") == "Rule"]
+
+    optional_enrollment = any(_mfa_policy_has_optional_factors(row) for row in mfa_policy_rows)
+    auth_requires_mfa = any(_actions_reference_mfa(_as_dict(row.get("Actions"))) for row in auth_rule_rows)
+
+    return {
+        "optional_enrollment": optional_enrollment,
+        "auth_requires_mfa": auth_requires_mfa,
+        "has_data": bool(mfa_policy_rows or auth_rule_rows),
+    }
+
+
+def _identity_validation(title, severity, records, warning_summary, pass_summary, empty_summary=None, data_available=True):
+    if records:
+        return _validation(title, "Fail", warning_summary(records), records[:20], severity=severity)
+    if not data_available and empty_summary:
+        return _validation(title, "Pass", empty_summary, severity=severity)
+    return _validation(title, "Pass", pass_summary, severity=severity)
+
+
+def _unsupported_ispm_validations():
+    return []
 
 
 def _run_security_validations(sections, extra_context=None):
@@ -322,14 +698,14 @@ def _run_security_validations(sections, extra_context=None):
     if not policy_map:
         validations.append(_validation(
             "App Sign-On Policy Catch-All Deny",
-            "Info",
+            "Pass",
             "No authentication/app sign-on policy rule data was available to validate catch-all deny posture.",
             severity="High",
         ))
     elif missing_or_not_deny:
         validations.append(_validation(
             "App Sign-On Policy Catch-All Deny",
-            "Warning",
+            "Fail",
             f"{len(missing_or_not_deny)} policy(s) may not have a catch-all/default deny rule configured.",
             [f"{item['policy']}: {item['issue']}" for item in missing_or_not_deny],
             severity="High",
@@ -364,7 +740,7 @@ def _run_security_validations(sections, extra_context=None):
     if not session_rule_rows:
         validations.append(_validation(
             "Session Lifetime <= 2 Hours",
-            "Info",
+            "Pass",
             "No global session policy rule data was available to validate session timeout settings.",
             severity="High",
         ))
@@ -372,7 +748,7 @@ def _run_security_validations(sections, extra_context=None):
         policy_count = len({(v["policy"]) for v in timeout_violations})
         validations.append(_validation(
             "Session Lifetime <= 2 Hours",
-            "Warning",
+            "Fail",
             f"Session lifetime duration is more than 2 hours on {policy_count} policy(s).",
             [
                 f"{v['policy']} / {v['rule']}: {v['path']} = {v['raw']} (~{int(v['minutes'])} min)"
@@ -398,15 +774,54 @@ def _run_security_validations(sections, extra_context=None):
         ("Factor Reset Notifications", "Authenticator reset notification email"),
     ]
     for title, setting_name in notification_checks:
+        if not sec_rows:
+            validations.append(_validation(
+                title,
+                "Pass",
+                f"No security settings data was available to validate {title.lower()}.",
+                severity="High",
+            ))
+            continue
         value = _find_setting_value(sec_rows, setting_name)
         status = _status_from_boolish_enabled(value)
         if status == "Pass":
             summary = f"{title} are enabled."
-        elif status == "Warning":
+        elif status == "Fail":
             summary = f"{title} are disabled."
         else:
             summary = f"{title} setting was not available in tenant response."
         validations.append(_validation(title, status, summary, severity="High"))
+
+    threatinsight_action = _find_setting_value(sec_rows, "Action")
+    if not sec_rows:
+        validations.append(_validation(
+            "ThreatInsight Blocking",
+            "Pass",
+            "No security settings data was available to validate ThreatInsight blocking.",
+            severity="High",
+        ))
+    elif threatinsight_action is None:
+        validations.append(_validation(
+            "ThreatInsight Blocking",
+            "Info",
+            "ThreatInsight action setting was not available in tenant response.",
+            severity="High",
+        ))
+    elif "enforce" in str(threatinsight_action).lower() or "block" in str(threatinsight_action).lower():
+        validations.append(_validation(
+            "ThreatInsight Blocking",
+            "Pass",
+            "ThreatInsight is configured to block or enforce security on suspicious IP activity.",
+            severity="High",
+        ))
+    else:
+        validations.append(_validation(
+            "ThreatInsight Blocking",
+            "Fail",
+            "ThreatInsight is not configured in blocking/enforcement mode.",
+            [str(threatinsight_action)],
+            severity="High",
+        ))
 
     # Weak password policies (Moderate)
     pwd_rows = (section_by_id.get("password-policies") or {}).get("rows") or []
@@ -419,14 +834,14 @@ def _run_security_validations(sections, extra_context=None):
     if not pwd_policy_rows:
         validations.append(_validation(
             "Password Policy Strength",
-            "Info",
+            "Pass",
             "No password policy data was available for password strength validation.",
             severity="Moderate",
         ))
     elif weak_pwd:
         validations.append(_validation(
             "Password Policy Strength",
-            "Warning",
+            "Fail",
             f"Password policies for {len(weak_pwd)} policy(s) are weak.",
             [f"{name}: {', '.join(issues[:3])}" for name, issues in weak_pwd],
             severity="Moderate",
@@ -448,14 +863,14 @@ def _run_security_validations(sections, extra_context=None):
     if not zone_rows:
         validations.append(_validation(
             "Blocklisted Network Zone Presence",
-            "Info",
+            "Pass",
             "No network zone data was available to validate blocklisted zone configuration.",
             severity="Moderate",
         ))
     elif not has_block_zone:
         validations.append(_validation(
             "Blocklisted Network Zone Presence",
-            "Warning",
+            "Fail",
             "Network Zones do not contain a block listed zone.",
             severity="Moderate",
         ))
@@ -479,24 +894,35 @@ def _run_security_validations(sections, extra_context=None):
             weak_factor_policies.append((name, weak_factors))
         if _mfa_policy_has_optional_factors(row):
             optional_factor_policies.append(name)
+    policies_without_required_factor = [
+        row.get("Name") or row.get("Policy Name") or "Unnamed Policy"
+        for row in mfa_policy_rows
+        if not _policy_has_required_authenticator(row)
+    ]
 
     if not mfa_policy_rows:
         validations.append(_validation(
             "Weaker Factors in MFA Enrollment Policies",
-            "Info",
+            "Pass",
             "No MFA enrollment policy data was available to evaluate weaker factor usage.",
             severity="High",
         ))
         validations.append(_validation(
             "Optional Factors in MFA Enrollment Policies",
-            "Info",
+            "Pass",
             "No MFA enrollment policy data was available to evaluate optional factor enrollment.",
             severity="Moderate",
+        ))
+        validations.append(_validation(
+            "Required Authenticator in MFA Enrollment Policies",
+            "Pass",
+            "No MFA enrollment policy data was available to evaluate required authenticator posture.",
+            severity="High",
         ))
     else:
         validations.append(_validation(
             "Weaker Factors in MFA Enrollment Policies",
-            "Warning" if weak_factor_policies else "Pass",
+            "Fail" if weak_factor_policies else "Pass",
             (f"Weaker factors are set in {len(weak_factor_policies)} policies."
              if weak_factor_policies else "No weaker factors detected in MFA enrollment policy settings."),
             [f"{name}: {', '.join(factors)}" for name, factors in weak_factor_policies[:20]],
@@ -504,11 +930,22 @@ def _run_security_validations(sections, extra_context=None):
         ))
         validations.append(_validation(
             "Optional Factors in MFA Enrollment Policies",
-            "Warning" if optional_factor_policies else "Pass",
+            "Fail" if optional_factor_policies else "Pass",
             (f"Factors are optional for {len(optional_factor_policies)} Factor Enrollment policies."
              if optional_factor_policies else "No optional factor enrollment settings detected in MFA enrollment policies."),
             optional_factor_policies[:20],
             severity="Moderate",
+        ))
+        validations.append(_validation(
+            "Required Authenticator in MFA Enrollment Policies",
+            "Fail" if policies_without_required_factor else "Pass",
+            (
+                f"{len(policies_without_required_factor)} MFA enrollment policy(ies) do not appear to require any authenticator."
+                if policies_without_required_factor
+                else "Every MFA enrollment policy appears to require at least one authenticator."
+            ),
+            policies_without_required_factor[:20],
+            severity="High",
         ))
 
     # SAML apps disabled (High) using full app inventory (including inactive)
@@ -516,7 +953,7 @@ def _run_security_validations(sections, extra_context=None):
     if not all_apps:
         validations.append(_validation(
             "SAML Authentication Supported but Disabled Apps",
-            "Info",
+            "Pass",
             "No full application inventory was available to validate disabled SAML apps.",
             severity="High",
         ))
@@ -528,12 +965,1249 @@ def _run_security_validations(sections, extra_context=None):
         ]
         validations.append(_validation(
             "SAML Authentication Supported but Disabled Apps",
-            "Warning" if disabled_saml else "Pass",
+            "Fail" if disabled_saml else "Pass",
             (f"SAML authentication is supported but disabled for {len(disabled_saml)} apps."
              if disabled_saml else "No disabled SAML applications were detected."),
             [str(app.get("label") or app.get("name") or app.get("id")) for app in disabled_saml[:20]],
             severity="High",
         ))
+
+    # Org settings readiness checks
+    org_setting_map = _row_map(_section_rows(section_by_id, "org-settings"))
+    org_missing = [
+        label for label in [
+            "Company Name",
+            "Website",
+            "End User Support Help URL",
+            "Billing Contact Email",
+            "Technical Contact Email",
+        ]
+        if _blankish(org_setting_map.get(label))
+    ]
+    validations.append(_identity_validation(
+        "Organization Support Metadata Completeness",
+        "Moderate",
+        org_missing,
+        lambda items: f"{len(items)} important org support/contact setting(s) are missing.",
+        "Core org support and contact metadata are populated.",
+        "Organization settings were not available for validation.",
+        data_available=bool(_section_rows(section_by_id, "org-settings")),
+    ))
+
+    # Group hygiene checks
+    group_rows = _section_rows(section_by_id, "groups")
+    groups_missing_description = [
+        str(row.get("Group Name") or "Unnamed Group")
+        for row in group_rows
+        if _blankish(row.get("Description"))
+    ]
+    validations.extend([
+        _identity_validation(
+            "Groups Missing Description",
+            "Low",
+            groups_missing_description,
+            lambda items: f"{len(items)} group(s) do not have a description.",
+            "All Okta groups have descriptions.",
+            "No group data was available for group description validation.",
+            data_available=bool(group_rows),
+        ),
+    ])
+
+    # Group rule hygiene
+    group_rule_rows = _section_rows(section_by_id, "group-rules")
+    disabled_group_rules = [
+        str(row.get("Rule Name") or "Unnamed Rule")
+        for row in group_rule_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    group_rules_without_target = [
+        str(row.get("Rule Name") or "Unnamed Rule")
+        for row in group_rule_rows
+        if _blankish(row.get("Then"))
+    ]
+    validations.extend([
+        _identity_validation(
+            "Disabled Group Rules",
+            "Low",
+            disabled_group_rules,
+            lambda items: f"{len(items)} group rule(s) are not active.",
+            "All group rules are active.",
+            "No group rule data was available for rule status validation.",
+            data_available=bool(group_rule_rows),
+        ),
+        _identity_validation(
+            "Group Rules Without Target Assignment",
+            "High",
+            group_rules_without_target,
+            lambda items: f"{len(items)} group rule(s) do not have an assignment target in the extracted action set.",
+            "All group rules have an explicit target assignment.",
+            "No group rule data was available for action validation.",
+            data_available=bool(group_rule_rows),
+        ),
+    ])
+
+    # Network zones
+    zone_rows = _section_rows(section_by_id, "network-zones")
+    inactive_zones = [
+        str(row.get("Name") or "Unnamed Zone")
+        for row in zone_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    empty_trusted_zones = [
+        str(row.get("Name") or "Unnamed Zone")
+        for row in zone_rows
+        if str(row.get("Usage") or "").strip().upper() == "TRUSTED"
+        and _blankish(row.get("Gateways"))
+        and _blankish(row.get("Proxies"))
+    ]
+    validations.extend([
+        _identity_validation(
+            "Inactive Network Zones",
+            "Low",
+            inactive_zones,
+            lambda items: f"{len(items)} network zone(s) are not active.",
+            "All network zones are active.",
+            "No network zone data was available for validation.",
+            data_available=True,
+        ),
+        _identity_validation(
+            "Trusted Network Zones Without Entries",
+            "Moderate",
+            empty_trusted_zones,
+            lambda items: f"{len(items)} trusted network zone(s) do not list gateways or proxies.",
+            "All trusted network zones contain gateway or proxy entries.",
+            "No network zone data was available for trusted-zone validation.",
+            data_available=bool(zone_rows),
+        ),
+    ])
+
+    # Authenticators
+    authenticator_rows = _section_rows(section_by_id, "authenticators")
+    weak_authenticators = [
+        f"{row.get('Name')}: {row.get('Status')}"
+        for row in authenticator_rows
+        if str(row.get("Status") or "").strip().upper() == "ACTIVE"
+        and _contains_token(row.get("Key"), ["email", "phone", "security_question"])
+    ]
+    strong_authenticator_present = any(
+        str(row.get("Status") or "").strip().upper() == "ACTIVE"
+        and _contains_token(row.get("Key"), ["okta_verify", "webauthn", "security_key"])
+        for row in authenticator_rows
+    )
+    validations.extend([
+        _identity_validation(
+            "Weak Authenticators Enabled",
+            "High",
+            weak_authenticators,
+            lambda items: f"{len(items)} weaker authenticator(s) are active.",
+            "No weaker authenticators were detected as active.",
+            "No authenticator data was available for validation.",
+            data_available=bool(authenticator_rows),
+        ),
+        _identity_validation(
+            "Phishing-Resistant Authenticator Availability",
+            "High",
+            [] if strong_authenticator_present else ["No active Okta Verify / WebAuthn / security key authenticator detected"],
+            lambda items: items[0],
+            "At least one phishing-resistant authenticator is available.",
+            "No authenticator data was available for phishing-resistant authenticator validation.",
+            data_available=bool(authenticator_rows),
+        ),
+    ])
+
+    # Applications
+    application_rows = _section_rows(section_by_id, "applications")
+    everyone_assigned_apps = [
+        str(row.get("Name") or "Unnamed App")
+        for row in application_rows
+        if _contains_token(row.get("Groups"), ["Everyone"])
+    ]
+    password_based_apps = [
+        str(row.get("Name") or "Unnamed App")
+        for row in application_rows
+        if str(row.get("Type") or "").upper() in {"AUTO_LOGIN", "BROWSER_PLUGIN", "SECURE_PASSWORD_STORE"}
+    ]
+    validations.extend([
+        _identity_validation(
+            "Applications Assigned to Everyone",
+            "Moderate",
+            everyone_assigned_apps,
+            lambda items: f"{len(items)} application(s) are assigned to the Everyone group.",
+            "No applications were found assigned to Everyone.",
+            "No application data was available for assignment validation.",
+            data_available=bool(application_rows),
+        ),
+        _identity_validation(
+            "Password-Based Application Sign-On Modes Present",
+            "High",
+            password_based_apps,
+            lambda items: f"{len(items)} application(s) use password-based or SWA-style sign-on modes.",
+            "No password-based or SWA-style application sign-on modes were detected.",
+            "No application data was available for sign-on-mode validation.",
+            data_available=bool(application_rows),
+        ),
+    ])
+
+    # Identity providers and discovery
+    idp_rows = _section_rows(section_by_id, "identity-providers")
+    inactive_idps = [
+        str(row.get("Name") or "Unnamed IdP")
+        for row in idp_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    idp_discovery_rows = _section_rows(section_by_id, "idp-discovery-policies", entry_type="Rule")
+    inactive_idp_discovery_rules = [
+        f"{row.get('Policy Name')}: {row.get('Rule Name')}"
+        for row in idp_discovery_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    validations.extend([
+        _identity_validation(
+            "Inactive Identity Providers",
+            "Low",
+            inactive_idps,
+            lambda items: f"{len(items)} identity provider(s) are not active.",
+            "All identity providers are active.",
+            "No identity provider data was available for validation.",
+            data_available=True,
+        ),
+        _identity_validation(
+            "Inactive IdP Discovery Rules",
+            "Low",
+            inactive_idp_discovery_rules,
+            lambda items: f"{len(items)} IdP discovery rule(s) are not active.",
+            "All IdP discovery rules are active.",
+            "No IdP discovery policy rule data was available for validation.",
+            data_available=True,
+        ),
+    ])
+
+    # Authorization server checks
+    authz_server_rows = _section_rows(section_by_id, "authz-servers")
+    authz_access_rule_rows = _section_rows(section_by_id, "authz-access-policies", entry_type="Rule")
+    manual_rotation_servers = [
+        str(row.get("Name") or "Unnamed Authorization Server")
+        for row in authz_server_rows
+        if str(row.get("Credentials Rotation Mode") or "").strip().upper() not in {"AUTO", "AUTOMATIC"}
+    ]
+    authz_any_client_rules = [
+        f"{row.get('Authorization Server')} / {row.get('Policy Name')} / {row.get('Rule Name')}"
+        for row in authz_access_rule_rows
+        if _contains_token(row.get("Conditions"), ["Any client", "Any"])
+    ]
+    validations.extend([
+        _identity_validation(
+            "Authorization Servers Without Automatic Key Rotation",
+            "Moderate",
+            manual_rotation_servers,
+            lambda items: f"{len(items)} authorization server(s) do not report automatic credential rotation.",
+            "All authorization servers report automatic credential rotation.",
+            "No authorization server settings were available for rotation validation.",
+            data_available=bool(authz_server_rows),
+        ),
+        _identity_validation(
+            "Authorization Server Access Rules With Broad Client Scope",
+            "Moderate",
+            authz_any_client_rules,
+            lambda items: f"{len(items)} authorization server access rule(s) appear to apply to any client.",
+            "No authorization server access rules were found with broad any-client scope.",
+            "No authorization server access policy rule data was available for validation.",
+            data_available=bool(authz_access_rule_rows),
+        ),
+    ])
+
+    # Admin governance
+    custom_role_rows = _section_rows(section_by_id, "custom-admin-roles")
+    custom_roles_missing_description = [
+        str(row.get("Label") or "Unnamed Role")
+        for row in custom_role_rows
+        if _blankish(row.get("Description"))
+    ]
+    resource_set_rows = _section_rows(section_by_id, "resource-sets")
+    resource_sets = {}
+    for row in resource_set_rows:
+        entry_type = str(row.get("Entry Type") or "")
+        label = row.get("Label") or row.get("Resource Set")
+        if not label:
+            continue
+        bucket = resource_sets.setdefault(str(label), {"resource": 0, "binding": 0})
+        if entry_type == "Resource":
+            bucket["resource"] += 1
+        elif entry_type == "Binding":
+            bucket["binding"] += 1
+    resource_sets_without_resources = [name for name, counts in sorted(resource_sets.items()) if counts["resource"] == 0]
+    resource_sets_without_bindings = [name for name, counts in sorted(resource_sets.items()) if counts["binding"] == 0]
+    admin_app_rows = _section_rows(section_by_id, "admin-assignments-apps")
+    validations.extend([
+        _identity_validation(
+            "Custom Admin Roles Missing Description",
+            "Low",
+            custom_roles_missing_description,
+            lambda items: f"{len(items)} custom admin role(s) do not have a description.",
+            "All custom admin roles have descriptions.",
+            "No custom admin role data was available for validation.",
+            data_available=bool(custom_role_rows),
+        ),
+        _identity_validation(
+            "Resource Sets Without Resources",
+            "Moderate",
+            resource_sets_without_resources,
+            lambda items: f"{len(items)} resource set(s) do not contain any resources.",
+            "All resource sets contain at least one resource.",
+            "No resource set data was available for validation.",
+            data_available=bool(resource_set_rows),
+        ),
+        _identity_validation(
+            "Resource Sets Without Bindings",
+            "Moderate",
+            resource_sets_without_bindings,
+            lambda items: f"{len(items)} resource set(s) do not contain any bindings.",
+            "All resource sets contain at least one binding.",
+            "No resource set data was available for validation.",
+            data_available=bool(resource_set_rows),
+        ),
+        _identity_validation(
+            "Admin Public Client Applications Present",
+            "Moderate",
+            [str(row.get("Display Name") or row.get("App Name") or "Unnamed Admin App") for row in admin_app_rows],
+            lambda items: f"{len(items)} admin public client application(s) are configured and should be reviewed.",
+            "No admin public client applications were detected.",
+            "No admin app assignment data was available for validation.",
+            data_available=bool(admin_app_rows) or bool(_section_rows(section_by_id, "admin-assignments-apps")),
+        ),
+    ])
+
+    api_token_rows = _section_rows(section_by_id, "api-tokens")
+    tokens_without_network_restrictions = []
+    for row in api_token_rows:
+        network = row.get("Network")
+        if isinstance(network, dict):
+            connection = str(network.get("connection") or "").strip().upper()
+            include = network.get("include") or []
+            exclude = network.get("exclude") or []
+            if connection in {"", "ANYWHERE", "ANY_NETWORK"} and not include and not exclude:
+                tokens_without_network_restrictions.append(str(row.get("Name") or row.get("Token ID") or "Unnamed Token"))
+        elif _blankish(network):
+            tokens_without_network_restrictions.append(str(row.get("Name") or row.get("Token ID") or "Unnamed Token"))
+    validations.append(_identity_validation(
+        "API Tokens Without Network Restrictions",
+        "High",
+        tokens_without_network_restrictions,
+        lambda items: f"{len(items)} API token(s) do not show network restrictions.",
+        "All extracted API tokens show some form of network restriction.",
+        "No API token data was available for network restriction validation.",
+        data_available=bool(api_token_rows),
+    ))
+
+    # Brand and UX
+    brand_setting_rows = _section_rows(section_by_id, "brand-settings")
+    brands_missing_privacy = [
+        str(row.get("Brand Name") or "Unnamed Brand")
+        for row in brand_setting_rows
+        if _blankish(row.get("Custom Privacy Policy URL"))
+    ]
+    validations.extend([
+        _identity_validation(
+            "Brands Missing Custom Privacy Policy URL",
+            "Low",
+            brands_missing_privacy,
+            lambda items: f"{len(items)} brand(s) do not define a custom privacy policy URL.",
+            "All brands define a custom privacy policy URL.",
+            "No brand settings were available for validation.",
+            data_available=bool(brand_setting_rows),
+        ),
+    ])
+
+    # Trusted origins and hooks
+    trusted_origin_rows = _section_rows(section_by_id, "trusted-origins")
+    insecure_origins = [
+        str(row.get("Origin") or row.get("Name") or "Unnamed Origin")
+        for row in trusted_origin_rows
+        if str(row.get("Origin") or "").strip().lower().startswith("http://")
+    ]
+    event_hook_rows = _section_rows(section_by_id, "event-hooks")
+    unverified_event_hooks = [
+        str(row.get("Name") or "Unnamed Event Hook")
+        for row in event_hook_rows
+        if str(row.get("Verification Status") or "").strip().upper() != "VERIFIED"
+    ]
+    weak_event_hook_auth = [
+        str(row.get("Name") or "Unnamed Event Hook")
+        for row in event_hook_rows
+        if _blankish(row.get("Auth Scheme"))
+    ]
+    inactive_event_hooks = [
+        str(row.get("Name") or "Unnamed Event Hook")
+        for row in event_hook_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    inline_hook_rows = _section_rows(section_by_id, "inline-hooks")
+    inactive_inline_hooks = [
+        str(row.get("Name") or "Unnamed Inline Hook")
+        for row in inline_hook_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    weak_inline_hook_auth = [
+        str(row.get("Name") or "Unnamed Inline Hook")
+        for row in inline_hook_rows
+        if _blankish(row.get("Auth Scheme"))
+    ]
+    validations.extend([
+        _identity_validation(
+            "Insecure Trusted Origins",
+            "High",
+            insecure_origins,
+            lambda items: f"{len(items)} trusted origin(s) use HTTP instead of HTTPS.",
+            "No HTTP trusted origins were detected.",
+            "No trusted origin data was available for protocol validation.",
+            data_available=bool(trusted_origin_rows),
+        ),
+        _identity_validation(
+            "Unverified Event Hooks",
+            "High",
+            unverified_event_hooks,
+            lambda items: f"{len(items)} event hook(s) are not verified.",
+            "All event hooks are verified, or no event hooks are configured.",
+            "No event hook data was available for verification-status validation.",
+            data_available=True,
+        ),
+        _identity_validation(
+            "Event Hooks Without Authentication Scheme",
+            "High",
+            weak_event_hook_auth,
+            lambda items: f"{len(items)} event hook(s) do not report an authentication scheme.",
+            "All event hooks report an authentication scheme, or no event hooks are configured.",
+            "No event hook data was available for auth-scheme validation.",
+            data_available=True,
+        ),
+        _identity_validation(
+            "Inactive Event Hooks",
+            "Low",
+            inactive_event_hooks,
+            lambda items: f"{len(items)} event hook(s) are not active.",
+            "All event hooks are active, or no event hooks are configured.",
+            "No event hook data was available for status validation.",
+            data_available=True,
+        ),
+        _identity_validation(
+            "Inline Hooks Without Authentication Scheme",
+            "High",
+            weak_inline_hook_auth,
+            lambda items: f"{len(items)} inline hook(s) do not report an authentication scheme.",
+            "All inline hooks report an authentication scheme.",
+            "No inline hook data was available for auth-scheme validation.",
+            data_available=bool(inline_hook_rows),
+        ),
+        _identity_validation(
+            "Inactive Inline Hooks",
+            "Low",
+            inactive_inline_hooks,
+            lambda items: f"{len(items)} inline hook(s) are not active.",
+            "All inline hooks are active, or no inline hooks are configured.",
+            "No inline hook data was available for status validation.",
+            data_available=True,
+        ),
+    ])
+
+    # Attack protection
+    attack_rows = _section_rows(section_by_id, "attack-protection")
+    weak_attack_protection_rows = [
+        f"{row.get('Component')} / {row.get('Field')}: {row.get('Value')}"
+        for row in attack_rows
+        if _contains_token(row.get("Field"), ["enabled", "mode", "status", "action"])
+        and _contains_token(row.get("Value"), ["disabled", "false", "none", "log"])
+    ]
+    validations.append(_identity_validation(
+        "Attack Protection Controls Not Enforcing",
+        "High",
+        weak_attack_protection_rows,
+        lambda items: f"{len(items)} attack-protection setting(s) appear disabled or monitor-only.",
+        "No extracted attack-protection settings appeared disabled or monitor-only.",
+        "No attack-protection data was available for validation.",
+        data_available=bool(attack_rows),
+    ))
+
+    # Realms
+    realm_rows = _section_rows(section_by_id, "realms")
+    inactive_realms = [
+        str(row.get("Name") or "Unnamed Realm")
+        for row in realm_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    realm_assignment_rows = _section_rows(section_by_id, "realm-assignments")
+    default_realm_assignments = [
+        str(row.get("Name") or "Unnamed Assignment")
+        for row in realm_assignment_rows
+        if str(row.get("Is Default") or "").strip().lower() == "true"
+    ]
+    validations.extend([
+        _identity_validation(
+            "Inactive Realms",
+            "Low",
+            inactive_realms,
+            lambda items: f"{len(items)} realm(s) are not active.",
+            "All realms are active.",
+            "No realm data was available for validation.",
+            data_available=True,
+        ),
+        _identity_validation(
+            "Realm Default Assignment Coverage",
+            "High",
+            [] if len(default_realm_assignments) == 1 else [f"Default assignments found: {len(default_realm_assignments)}"],
+            lambda items: "Realm assignments should contain exactly one default assignment.",
+            "Realm assignments contain exactly one default assignment.",
+            "No realm assignment data was available for default-assignment validation.",
+            data_available=bool(realm_assignment_rows),
+        ),
+    ])
+
+    # Profile schema and mappings
+    schema_rows = _section_rows(section_by_id, "profile-schema-user")
+    sensitive_writable_attrs = [
+        f"{row.get('Attribute')}: {row.get('Mutability')}"
+        for row in schema_rows
+        if _contains_token(row.get("Attribute"), ["password", "secret", "token", "ssn", "salary"])
+        and _contains_token(row.get("Mutability"), ["read_write", "write"])
+    ]
+    profile_mapping_rows = _section_rows(section_by_id, "profile-mappings")
+    empty_profile_mappings = [
+        f"{row.get('Source Name')} -> {row.get('Target Name')}"
+        for row in profile_mapping_rows
+        if _blankish(row.get("Properties")) or _text(row.get("Properties")) == "{}"
+    ]
+    validations.extend([
+        _identity_validation(
+            "Sensitive Writable Profile Attributes",
+            "High",
+            sensitive_writable_attrs,
+            lambda items: f"{len(items)} sensitive profile attribute(s) appear writable.",
+            "No sensitive writable profile attributes were detected by name heuristic.",
+            "No user profile schema data was available for validation.",
+            data_available=bool(schema_rows),
+        ),
+        _identity_validation(
+            "Empty Profile Mappings",
+            "Moderate",
+            empty_profile_mappings,
+            lambda items: f"{len(items)} profile mapping(s) do not contain extracted property mappings.",
+            "All extracted profile mappings contain property mappings.",
+            "No profile mapping data was available for validation.",
+            data_available=bool(profile_mapping_rows),
+        ),
+    ])
+
+    # Group push mappings
+    group_push_rows = _section_rows(section_by_id, "group-push-mappings")
+    inactive_group_push = [
+        f"{row.get('App Name')}: {row.get('Source Group')} -> {row.get('Target Group')}"
+        for row in group_push_rows
+        if _looks_like_inactive(row.get("Status"))
+    ]
+    stale_group_push = [
+        f"{row.get('App Name')}: {row.get('Source Group')} -> {row.get('Target Group')}"
+        for row in group_push_rows
+        if (_days_since(row.get("Last Updated")) or 0) >= 90
+    ]
+    validations.extend([
+        _identity_validation(
+            "Inactive Group Push Mappings",
+            "Low",
+            inactive_group_push,
+            lambda items: f"{len(items)} group push mapping(s) are not active.",
+            "All group push mappings are active, or no group push mappings are configured.",
+            "No group push mapping data was available for validation.",
+            data_available=True,
+        ),
+        _identity_validation(
+            "Stale Group Push Mappings",
+            "Low",
+            stale_group_push,
+            lambda items: f"{len(items)} group push mapping(s) have not been updated in at least 90 days.",
+            "No stale group push mappings were detected using the 90-day age heuristic.",
+            "No group push mapping data was available for age validation.",
+            data_available=bool(group_push_rows),
+        ),
+    ])
+
+    # Risk-aware policies
+    entity_risk_rule_rows = _section_rows(section_by_id, "entity-risk-policies", entry_type="Rule")
+    post_auth_rule_rows = _section_rows(section_by_id, "post-auth-session-policies", entry_type="Rule")
+    active_entity_risk_rules = [
+        row for row in entity_risk_rule_rows
+        if not _looks_like_inactive(row.get("Status"))
+    ]
+    active_post_auth_rules = [
+        row for row in post_auth_rule_rows
+        if not _looks_like_inactive(row.get("Status"))
+    ]
+    validations.extend([
+        _identity_validation(
+            "Entity Risk Policy Rule Coverage",
+            "High",
+            [] if active_entity_risk_rules else ["No active entity risk policy rules detected"],
+            lambda items: items[0],
+            "Active entity risk policy rules were detected.",
+            "No entity risk policy data was available for validation.",
+            data_available=bool(_section_rows(section_by_id, "entity-risk-policies")),
+        ),
+        _identity_validation(
+            "Identity Threat Protection Policy Rule Coverage",
+            "High",
+            [] if active_post_auth_rules else ["No active identity threat protection policy rules detected"],
+            lambda items: items[0],
+            "Active identity threat protection policy rules were detected.",
+            "No identity threat protection policy data was available for validation.",
+            data_available=bool(_section_rows(section_by_id, "post-auth-session-policies")),
+        ),
+    ])
+
+    # HealthInsight-specific policy heuristics
+    auth_policy_rule_rows = _section_rows(section_by_id, "authentication-policies", entry_type="Rule")
+    session_policy_rule_rows = _section_rows(section_by_id, "global-session-policies", entry_type="Rule")
+    risk_based_mfa_gaps = []
+    new_device_mfa_gaps = []
+    for row in auth_policy_rule_rows + session_policy_rule_rows:
+        conditions = {
+            "people": row.get("Conditions People"),
+            "network": row.get("Conditions Network"),
+            "authContext": row.get("Conditions AuthContext"),
+            "risk": row.get("Conditions Risk"),
+            "riskScore": row.get("Conditions RiskScore"),
+            "identityProvider": row.get("Conditions IdentityProvider"),
+        }
+        actions = _as_dict(row.get("Actions"))
+        if _conditions_reference_high_risk(conditions) and not (
+            _actions_reference_mfa(actions) and _actions_reference_every_sign_in(actions)
+        ):
+            risk_based_mfa_gaps.append(f"{row.get('Policy Name')} / {row.get('Rule Name')}")
+        if _conditions_reference_new_device(conditions) and not (
+            _actions_reference_mfa(actions) and _actions_reference_every_sign_in(actions)
+        ):
+            new_device_mfa_gaps.append(f"{row.get('Policy Name')} / {row.get('Rule Name')}")
+
+    admin_console_apps = [
+        row for row in application_rows
+        if str(row.get("Name") or "").strip().lower() == "okta admin console"
+    ]
+    admin_console_mfa_gap = []
+    if admin_console_apps:
+        for app_row in admin_console_apps:
+            policy_name = str(app_row.get("Access Policy Name") or "").strip()
+            if not policy_name:
+                admin_console_mfa_gap.append(
+                    f"{app_row.get('Name')}: no app sign-on policy is assigned"
+                )
+                continue
+            matching_rules = [
+                row for row in auth_policy_rule_rows
+                if str(row.get("Policy Name") or "").strip() == policy_name
+            ]
+            if not matching_rules:
+                admin_console_mfa_gap.append(
+                    f"{app_row.get('Name')}: no app sign-on policy rules found for assigned policy '{policy_name}'"
+                )
+                continue
+            if not any(
+                _actions_reference_mfa(_as_dict(rule.get("Actions")))
+                and _actions_reference_every_sign_in(_as_dict(rule.get("Actions")))
+                for rule in matching_rules
+                if not _looks_like_inactive(rule.get("Status"))
+            ):
+                admin_console_mfa_gap.append(
+                    f"{app_row.get('Name')}: assigned policy '{policy_name}' has no active rule requiring MFA at every sign-in"
+                )
+    else:
+        admin_console_mfa_gap.append("Okta Admin Console application was not found in the extracted active applications")
+
+    validations.extend([
+        _identity_validation(
+            "High-Risk Request MFA Every Sign-In",
+            "High",
+            risk_based_mfa_gaps,
+            lambda items: f"{len(items)} policy rule(s) reference risk conditions without clear MFA-at-every-sign-in actions.",
+            "All extracted high-risk policy rules appear to require MFA at every sign-in.",
+            "No policy rule data was available to evaluate high-risk request MFA posture.",
+            data_available=bool(auth_policy_rule_rows or session_policy_rule_rows),
+        ),
+        _identity_validation(
+            "New Device MFA Every Sign-In",
+            "Moderate",
+            new_device_mfa_gaps,
+            lambda items: f"{len(items)} policy rule(s) reference device/new-device conditions without clear MFA-at-every-sign-in actions.",
+            "All extracted device/new-device policy rules appear to require MFA at every sign-in.",
+            "No policy rule data was available to evaluate new-device MFA posture.",
+            data_available=bool(auth_policy_rule_rows or session_policy_rule_rows),
+        ),
+        _identity_validation(
+            "Admin Console MFA Every Sign-In",
+            "High",
+            admin_console_mfa_gap,
+            lambda items: f"{len(items)} admin-console application policy path(s) do not show clear MFA-at-every-sign-in enforcement.",
+            "Admin Console application policies appear to require MFA at every sign-in.",
+            "Admin Console application or authentication policy data was not available for validation.",
+            data_available=bool(application_rows and auth_policy_rule_rows),
+        ),
+    ])
+
+    # Identity-risk detections aligned to Okta ISPM where data is available from native Okta APIs
+    users = extra_context.get("all_users") or []
+    api_tokens = extra_context.get("api_tokens") or []
+    custom_admin_roles = extra_context.get("custom_admin_roles") or []
+    resource_set_bindings = extra_context.get("resource_set_bindings") or []
+    user_inventory_available = "all_users" in extra_context
+    token_inventory_available = "api_tokens" in extra_context
+    admin_role_inventory_available = (
+        "custom_admin_roles" in extra_context and "resource_set_bindings" in extra_context
+    )
+    token_map = _token_inventory(api_tokens)
+    mfa_enforcement = _tenant_mfa_enforcement_gaps(section_by_id)
+
+    no_mfa_accounts = []
+    no_mfa_admin_accounts = []
+    no_mfa_global_admin_accounts = []
+    pending_mfa_accounts = []
+    pending_mfa_admin_accounts = []
+    pending_mfa_global_admin_accounts = []
+    no_mfa_enforced_admin_accounts = []
+    no_mfa_enforced_global_admin_accounts = []
+    old_password_accounts = []
+    old_password_service_accounts = []
+    old_password_admin_accounts = []
+    old_password_admin_service_accounts = []
+    old_password_global_admin_accounts = []
+    old_password_global_admin_service_accounts = []
+    unused_accounts = []
+    unused_service_accounts = []
+    unused_admin_accounts = []
+    unused_admin_service_accounts = []
+    unused_global_admin_accounts = []
+    unused_global_admin_service_accounts = []
+    sso_bypass_accounts = []
+    sso_bypass_admin_accounts = []
+    sso_bypass_no_mfa_accounts = []
+    sso_bypass_no_mfa_admin_accounts = []
+    old_no_mfa_unused_accounts = []
+    old_no_mfa_unused_admin_accounts = []
+    old_no_mfa_unused_service_accounts = []
+    old_no_mfa_unused_admin_service_accounts = []
+    partially_offboarded_users = []
+    super_admin_with_api_token = []
+    service_account_console_access_accounts = []
+    service_account_console_access_admin_accounts = []
+    unrotated_tokens_account = []
+    unrotated_tokens_admin = []
+    unused_tokens_account = []
+    unused_tokens_admin = []
+    unrotated_unused_tokens_account = []
+    unrotated_unused_tokens_admin = []
+    super_admins = []
+
+    for user in users:
+        user_id = user.get("id")
+        label = _user_identifier(user)
+        role_types = _user_role_types(user)
+        is_admin = bool(role_types)
+        is_super_admin = "SUPER_ADMIN" in role_types
+        active_tokens = token_map.get(user_id, [])
+        token_count = len(active_tokens)
+        is_service_account = _is_service_account(user, active_token_count=token_count)
+        has_mfa = _has_mfa(user)
+        pending_mfa = _has_pending_mfa(user)
+        direct_access = _is_direct_access_user(user)
+        old_password = _has_old_password(user, threshold_days=90)
+        unused_user = _is_unused_user(user, threshold_days=91)
+        no_mfa = not has_mfa
+        status = str(user.get("status") or "").strip().upper()
+        org_mfa_gap = mfa_enforcement["has_data"] and (
+            mfa_enforcement["optional_enrollment"] or not mfa_enforcement["auth_requires_mfa"]
+        )
+
+        if is_super_admin:
+            super_admins.append(label)
+
+        if no_mfa:
+            no_mfa_accounts.append(label)
+            if is_admin:
+                no_mfa_admin_accounts.append(label)
+            if is_super_admin:
+                no_mfa_global_admin_accounts.append(label)
+
+        if pending_mfa:
+            pending_mfa_accounts.append(f"{label}: pending factors {', '.join(sorted(_pending_factor_types(user)))}")
+            if is_admin:
+                pending_mfa_admin_accounts.append(f"{label}: pending factors {', '.join(sorted(_pending_factor_types(user)))}")
+            if is_super_admin:
+                pending_mfa_global_admin_accounts.append(f"{label}: pending factors {', '.join(sorted(_pending_factor_types(user)))}")
+
+        if old_password:
+            old_password_accounts.append(f"{label}: password age {_days_since(user.get('passwordChanged'))}d")
+            if is_service_account:
+                old_password_service_accounts.append(f"{label}: password age {_days_since(user.get('passwordChanged'))}d")
+            if is_admin:
+                old_password_admin_accounts.append(f"{label}: password age {_days_since(user.get('passwordChanged'))}d")
+            if is_admin and is_service_account:
+                old_password_admin_service_accounts.append(f"{label}: password age {_days_since(user.get('passwordChanged'))}d")
+            if is_super_admin:
+                old_password_global_admin_accounts.append(f"{label}: password age {_days_since(user.get('passwordChanged'))}d")
+            if is_super_admin and is_service_account:
+                old_password_global_admin_service_accounts.append(f"{label}: password age {_days_since(user.get('passwordChanged'))}d")
+
+        if unused_user:
+            days_text = _days_since(user.get("lastLogin"))
+            suffix = f"last login {days_text}d ago" if days_text is not None else "no recent interactive login"
+            unused_accounts.append(f"{label}: {suffix}")
+            if is_service_account:
+                unused_service_accounts.append(f"{label}: {suffix}")
+            if is_admin:
+                unused_admin_accounts.append(f"{label}: {suffix}")
+            if is_admin and is_service_account:
+                unused_admin_service_accounts.append(f"{label}: {suffix}")
+            if is_super_admin:
+                unused_global_admin_accounts.append(f"{label}: {suffix}")
+            if is_super_admin and is_service_account:
+                unused_global_admin_service_accounts.append(f"{label}: {suffix}")
+
+        if direct_access:
+            sso_bypass_accounts.append(f"{label}: provider {_user_provider_type(user) or 'unknown'}")
+            if is_admin:
+                sso_bypass_admin_accounts.append(f"{label}: provider {_user_provider_type(user) or 'unknown'}")
+
+        if direct_access and no_mfa:
+            sso_bypass_no_mfa_accounts.append(f"{label}: provider {_user_provider_type(user) or 'unknown'}")
+            if is_admin:
+                sso_bypass_no_mfa_admin_accounts.append(f"{label}: provider {_user_provider_type(user) or 'unknown'}")
+
+        if old_password and no_mfa and unused_user:
+            old_no_mfa_unused_accounts.append(label)
+            if is_admin:
+                old_no_mfa_unused_admin_accounts.append(label)
+            if is_service_account:
+                old_no_mfa_unused_service_accounts.append(label)
+            if is_admin and is_service_account:
+                old_no_mfa_unused_admin_service_accounts.append(label)
+
+        if org_mfa_gap and is_admin:
+            no_mfa_enforced_admin_accounts.append(label)
+        if org_mfa_gap and is_super_admin:
+            no_mfa_enforced_global_admin_accounts.append(label)
+
+        if status in {"SUSPENDED", "DEPROVISIONED"} and (is_admin or active_tokens or direct_access):
+            indicators = []
+            if is_admin:
+                indicators.append("admin role assignment")
+            if active_tokens:
+                indicators.append(f"{len(active_tokens)} active API token(s)")
+            if direct_access:
+                indicators.append(f"provider {_user_provider_type(user) or 'unknown'}")
+            partially_offboarded_users.append(f"{label}: status {status}; remaining access via {', '.join(indicators)}")
+
+        if is_service_account and direct_access:
+            service_account_console_access_accounts.append(f"{label}: provider {_user_provider_type(user) or 'unknown'}")
+            if is_admin:
+                service_account_console_access_admin_accounts.append(f"{label}: provider {_user_provider_type(user) or 'unknown'}")
+
+        if is_super_admin and active_tokens:
+            for token in active_tokens:
+                age_days = _token_rotation_age_days(token)
+                suffix = f"age {age_days}d" if age_days is not None else "active token"
+                super_admin_with_api_token.append(_format_token_item(user, token, suffix))
+
+        unrotated_tokens, unused_tokens = _token_findings_for_user(active_tokens, owner_unused=unused_user, rotation_days=90)
+        for token, age_days in unrotated_tokens:
+            item = _format_token_item(user, token, f"rotation age {age_days}d")
+            if is_admin:
+                unrotated_tokens_admin.append(item)
+            else:
+                unrotated_tokens_account.append(item)
+        for token in unused_tokens:
+            item = _format_token_item(user, token, "owner inactive >=91d")
+            if is_admin:
+                unused_tokens_admin.append(item)
+            else:
+                unused_tokens_account.append(item)
+        for token, age_days in unrotated_tokens:
+            if token in unused_tokens:
+                item = _format_token_item(user, token, f"rotation age {age_days}d; owner inactive >=91d")
+                if is_admin:
+                    unrotated_unused_tokens_admin.append(item)
+                else:
+                    unrotated_unused_tokens_account.append(item)
+
+    role_usage = _custom_role_usage_map(custom_admin_roles, resource_set_bindings)
+    unused_custom_roles = [
+        str(
+            details["role"].get("label")
+            or details["role"].get("name")
+            or details["role"].get("id")
+            or "Unnamed Role"
+        )
+        for details in role_usage.values()
+        if not details.get("used")
+    ]
+
+    validations.extend([
+        _identity_validation(
+            "Old Password, No MFA, Unused Accounts",
+            "High",
+            old_no_mfa_unused_accounts,
+            lambda items: f"{len(items)} account(s) have passwords older than 90 days, no active MFA, and no recent interactive use for at least 91 days.",
+            "No accounts matched the old-password, no-MFA, unused-account combination heuristic.",
+            "User inventory was not available to assess old-password, no-MFA, unused-account combinations.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password, No MFA, Unused Admin Accounts",
+            "High",
+            old_no_mfa_unused_admin_accounts,
+            lambda items: f"{len(items)} admin account(s) have passwords older than 90 days, no active MFA, and no recent interactive use for at least 91 days.",
+            "No admin accounts matched the old-password, no-MFA, unused-account combination heuristic.",
+            "User inventory was not available to assess old-password, no-MFA, unused admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password, No MFA, Unused Service Accounts",
+            "High",
+            old_no_mfa_unused_service_accounts,
+            lambda items: f"{len(items)} potential service account(s) have old passwords, no active MFA, and no recent interactive use.",
+            "No potential service accounts matched the old-password, no-MFA, unused heuristic.",
+            "User inventory was not available to assess old-password, no-MFA, unused service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password, No MFA, Unused Admin Service Accounts",
+            "High",
+            old_no_mfa_unused_admin_service_accounts,
+            lambda items: f"{len(items)} potential admin service account(s) have old passwords, no active MFA, and no recent interactive use.",
+            "No potential admin service accounts matched the old-password, no-MFA, unused heuristic.",
+            "User inventory was not available to assess old-password, no-MFA, unused admin service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "SSO Bypass + No MFA - Admin",
+            "High",
+            sso_bypass_no_mfa_admin_accounts,
+            lambda items: f"{len(items)} admin account(s) appear to have direct access that can bypass federated SSO and have no active MFA.",
+            "No admin accounts matched the direct-access plus no-active-MFA heuristic.",
+            "User inventory was not available to assess SSO bypass plus no MFA for admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "No MFA - Global Admin Account",
+            "High",
+            no_mfa_global_admin_accounts,
+            lambda items: f"{len(items)} super admin account(s) do not have an active enrolled factor.",
+            "All detected super admin accounts have at least one active enrolled factor.",
+            "User inventory was not available to assess MFA enrollment for super admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Pending MFA - Global Admin Account",
+            "High",
+            pending_mfa_global_admin_accounts,
+            lambda items: f"{len(items)} super admin account(s) appear to have pending factor enrollment without an active enrolled factor.",
+            "No super admin accounts were found with only pending factor enrollment.",
+            "User inventory was not available to assess pending MFA for super admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password - Global Admin Account",
+            "High",
+            old_password_global_admin_accounts,
+            lambda items: f"{len(items)} super admin account(s) have passwords older than 90 days.",
+            "No super admin accounts were found with passwords older than 90 days.",
+            "User inventory was not available to assess password age for super admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password - Global Admin Service Account",
+            "High",
+            old_password_global_admin_service_accounts,
+            lambda items: f"{len(items)} potential super admin service account(s) have passwords older than 90 days.",
+            "No potential super admin service accounts were found with passwords older than 90 days.",
+            "User inventory was not available to assess password age for super admin service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Global Admin Account",
+            "High",
+            unused_global_admin_accounts,
+            lambda items: f"{len(items)} super admin account(s) have not logged in interactively for at least 91 days.",
+            "No unused super admin accounts were detected using the 91-day inactivity heuristic.",
+            "User inventory was not available to assess unused super admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Global Admin Service Account",
+            "High",
+            unused_global_admin_service_accounts,
+            lambda items: f"{len(items)} potential super admin service account(s) have not logged in interactively for at least 91 days.",
+            "No unused potential super admin service accounts were detected using the 91-day inactivity heuristic.",
+            "User inventory was not available to assess unused super admin service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Partially Off-boarded User",
+            "High",
+            partially_offboarded_users,
+            lambda items: f"{len(items)} suspended or deprovisioned user(s) still appear to retain direct access, admin roles, or active API tokens.",
+            "No partially off-boarded users were detected with remaining privileged or direct access indicators.",
+            "User inventory was not available to assess partially off-boarded users.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "No MFA - Admin Account",
+            "High",
+            no_mfa_admin_accounts,
+            lambda items: f"{len(items)} admin account(s) do not have an active enrolled factor.",
+            "All detected admin accounts have at least one active enrolled factor.",
+            "User inventory was not available to assess MFA enrollment for admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Pending MFA - Admin Account",
+            "High",
+            pending_mfa_admin_accounts,
+            lambda items: f"{len(items)} admin account(s) appear to have pending factor enrollment without an active enrolled factor.",
+            "No admin accounts were found with only pending factor enrollment.",
+            "User inventory was not available to assess pending MFA for admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "No MFA Enforced - Global Admin Account",
+            "High",
+            no_mfa_enforced_global_admin_accounts if mfa_enforcement["has_data"] else [],
+            lambda items: f"{len(items)} super admin account(s) may not be covered by enforced MFA requirements based on tenant-wide enrollment/authentication policy heuristics.",
+            "Tenant-wide policy heuristics suggest MFA enforcement is present for super admin accounts.",
+            "Policy data was insufficient to infer tenant-wide MFA enforcement posture for super admin accounts.",
+            data_available=mfa_enforcement["has_data"],
+        ),
+        _identity_validation(
+            "Excessive Number of Super Admins",
+            "High",
+            super_admins if len(super_admins) > 3 else [],
+            lambda items: f"{len(items)} super admin accounts were detected. The heuristic threshold is more than 3.",
+            f"{len(super_admins)} super admin account(s) were detected, which is within the heuristic threshold of 3.",
+            "User inventory was not available to assess the number of super admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "SSO Bypass - Admin",
+            "High",
+            sso_bypass_admin_accounts,
+            lambda items: f"{len(items)} admin account(s) appear to support direct access outside federated SSO based on their credential provider.",
+            "No admin accounts matched the direct-access credential provider heuristic.",
+            "User inventory was not available to assess SSO bypass for admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "SSO Bypass + No MFA - Account",
+            "High",
+            sso_bypass_no_mfa_accounts,
+            lambda items: f"{len(items)} account(s) appear to support direct access outside federated SSO and have no active MFA.",
+            "No accounts matched the direct-access plus no-active-MFA heuristic.",
+            "User inventory was not available to assess SSO bypass plus no MFA for accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password - Admin Account",
+            "High",
+            old_password_admin_accounts,
+            lambda items: f"{len(items)} admin account(s) have passwords older than 90 days.",
+            "No admin accounts were found with passwords older than 90 days.",
+            "User inventory was not available to assess password age for admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password - Admin Service Account",
+            "High",
+            old_password_admin_service_accounts,
+            lambda items: f"{len(items)} potential admin service account(s) have passwords older than 90 days.",
+            "No potential admin service accounts were found with passwords older than 90 days.",
+            "User inventory was not available to assess password age for admin service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Super Admin with API Token",
+            "High",
+            super_admin_with_api_token,
+            lambda items: f"{len(items)} active API token(s) are owned by super admin accounts.",
+            "No active API tokens owned by super admin accounts were detected.",
+            "API token or user inventory was not available to assess super admin token ownership.",
+            data_available=user_inventory_available and token_inventory_available,
+        ),
+        _identity_validation(
+            "Unrotated and Unused Keys and Tokens - Admin",
+            "High",
+            unrotated_unused_tokens_admin,
+            lambda items: f"{len(items)} active API token(s) owned by admin accounts are older than 90 days and the owning account has been inactive for at least 91 days.",
+            "No admin-owned active API tokens matched the unrotated-and-owner-inactive heuristic.",
+            "API token or user inventory was not available to assess unrotated and unused admin tokens.",
+            data_available=user_inventory_available and token_inventory_available,
+        ),
+        _identity_validation(
+            "Unrotated Keys and Tokens - Admin",
+            "High",
+            unrotated_tokens_admin,
+            lambda items: f"{len(items)} active API token(s) owned by admin accounts are older than 90 days.",
+            "No admin-owned active API tokens older than 90 days were detected.",
+            "API token or user inventory was not available to assess token rotation age for admin accounts.",
+            data_available=user_inventory_available and token_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Admin Account",
+            "High",
+            unused_admin_accounts,
+            lambda items: f"{len(items)} admin account(s) have not logged in interactively for at least 91 days.",
+            "No unused admin accounts were detected using the 91-day inactivity heuristic.",
+            "User inventory was not available to assess unused admin accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Admin Service Account",
+            "High",
+            unused_admin_service_accounts,
+            lambda items: f"{len(items)} potential admin service account(s) have not logged in interactively for at least 91 days.",
+            "No unused potential admin service accounts were detected using the 91-day inactivity heuristic.",
+            "User inventory was not available to assess unused admin service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Keys and Tokens - Admins",
+            "High",
+            unused_tokens_admin,
+            lambda items: f"{len(items)} active API token(s) are owned by admin accounts that have been inactive for at least 91 days.",
+            "No admin-owned active API tokens matched the owner-inactive heuristic.",
+            "API token or user inventory was not available to assess unused admin tokens.",
+            data_available=user_inventory_available and token_inventory_available,
+        ),
+        _identity_validation(
+            "Service Account with Console Access - Admin",
+            "High",
+            service_account_console_access_admin_accounts,
+            lambda items: f"{len(items)} potential admin service account(s) appear to have direct console access based on their credential provider.",
+            "No potential admin service accounts matched the direct-console-access heuristic.",
+            "User inventory was not available to assess direct console access for admin service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Administrative Roles",
+            "High",
+            unused_custom_roles,
+            lambda items: f"{len(items)} custom admin role(s) were found without a matching resource-set binding.",
+            "All discovered custom admin roles were referenced by at least one resource-set binding.",
+            "Custom admin role inventory was not available to assess unused administrative roles.",
+            data_available=admin_role_inventory_available,
+        ),
+        _identity_validation(
+            "No MFA Enforced - Admin Account",
+            "Moderate",
+            no_mfa_enforced_admin_accounts if mfa_enforcement["has_data"] else [],
+            lambda items: f"{len(items)} admin account(s) may not be covered by enforced MFA requirements based on tenant-wide enrollment/authentication policy heuristics.",
+            "Tenant-wide policy heuristics suggest MFA enforcement is present for admin accounts.",
+            "Policy data was insufficient to infer tenant-wide MFA enforcement posture for admin accounts.",
+            data_available=mfa_enforcement["has_data"],
+        ),
+        _identity_validation(
+            "No MFA - Account",
+            "Moderate",
+            no_mfa_accounts,
+            lambda items: f"{len(items)} account(s) do not have an active enrolled factor.",
+            "All assessed accounts have at least one active enrolled factor.",
+            "User inventory was not available to assess MFA enrollment for accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Pending MFA",
+            "Moderate",
+            pending_mfa_accounts,
+            lambda items: f"{len(items)} account(s) appear to have pending factor enrollment without an active enrolled factor.",
+            "No accounts were found with only pending factor enrollment.",
+            "User inventory was not available to assess pending MFA for accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "SSO Bypass - Account",
+            "Moderate",
+            sso_bypass_accounts,
+            lambda items: f"{len(items)} account(s) appear to support direct access outside federated SSO based on their credential provider.",
+            "No accounts matched the direct-access credential provider heuristic.",
+            "User inventory was not available to assess SSO bypass for accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password - Account",
+            "Moderate",
+            old_password_accounts,
+            lambda items: f"{len(items)} account(s) have passwords older than 90 days.",
+            "No accounts were found with passwords older than 90 days.",
+            "User inventory was not available to assess password age for accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Old Password - Service Account",
+            "Moderate",
+            old_password_service_accounts,
+            lambda items: f"{len(items)} potential service account(s) have passwords older than 90 days.",
+            "No potential service accounts were found with passwords older than 90 days.",
+            "User inventory was not available to assess password age for potential service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unrotated and Unused Keys and Tokens - Account",
+            "Moderate",
+            unrotated_unused_tokens_account,
+            lambda items: f"{len(items)} active API token(s) owned by non-admin accounts are older than 90 days and the owning account has been inactive for at least 91 days.",
+            "No non-admin active API tokens matched the unrotated-and-owner-inactive heuristic.",
+            "API token or user inventory was not available to assess unrotated and unused tokens for accounts.",
+            data_available=user_inventory_available and token_inventory_available,
+        ),
+        _identity_validation(
+            "Unrotated Keys and Tokens - Account",
+            "Moderate",
+            unrotated_tokens_account,
+            lambda items: f"{len(items)} active API token(s) owned by non-admin accounts are older than 90 days.",
+            "No non-admin active API tokens older than 90 days were detected.",
+            "API token or user inventory was not available to assess token rotation age for accounts.",
+            data_available=user_inventory_available and token_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Account",
+            "Low",
+            unused_accounts,
+            lambda items: f"{len(items)} account(s) have not logged in interactively for at least 91 days.",
+            "No unused accounts were detected using the 91-day inactivity heuristic.",
+            "User inventory was not available to assess unused accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Service Account",
+            "Low",
+            unused_service_accounts,
+            lambda items: f"{len(items)} potential service account(s) have not logged in interactively for at least 91 days.",
+            "No unused potential service accounts were detected using the 91-day inactivity heuristic.",
+            "User inventory was not available to assess unused service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Service Account with Console Access - Account",
+            "Low",
+            service_account_console_access_accounts,
+            lambda items: f"{len(items)} potential service account(s) appear to have direct console access based on their credential provider.",
+            "No potential service accounts matched the direct-console-access heuristic.",
+            "User inventory was not available to assess direct console access for service accounts.",
+            data_available=user_inventory_available,
+        ),
+        _identity_validation(
+            "Unused Keys and Tokens - Account",
+            "Low",
+            unused_tokens_account,
+            lambda items: f"{len(items)} active API token(s) are owned by non-admin accounts that have been inactive for at least 91 days.",
+            "No non-admin active API tokens matched the owner-inactive heuristic.",
+            "API token or user inventory was not available to assess unused tokens for accounts.",
+            data_available=user_inventory_available and token_inventory_available,
+        ),
+    ])
+    validations.extend(_unsupported_ispm_validations())
 
     return validations
 
@@ -544,25 +2218,44 @@ def _build_validation_summary(validations):
         "high": 0,
         "medium": 0,
         "low": 0,
+        "high_failed": 0,
+        "medium_failed": 0,
+        "low_failed": 0,
         "passed": 0,
         "pass_pct": 0,
+        "high_fail_pct": 0,
+        "medium_fail_pct": 0,
+        "low_fail_pct": 0,
     }
     for check in validations or []:
         summary["assessed"] += 1
 
         severity = str(check.get("severity") or "").strip().lower()
+        status = str(check.get("status") or "").strip().lower()
         if severity == "high":
             summary["high"] += 1
+            if status == "fail":
+                summary["high_failed"] += 1
         elif severity in {"moderate", "medium"}:
             summary["medium"] += 1
+            if status == "fail":
+                summary["medium_failed"] += 1
         elif severity == "low":
             summary["low"] += 1
+            if status == "fail":
+                summary["low_failed"] += 1
 
-        if str(check.get("status") or "").strip().lower() == "pass":
+        if status == "pass":
             summary["passed"] += 1
 
     if summary["assessed"]:
         summary["pass_pct"] = round((summary["passed"] / summary["assessed"]) * 100)
+    if summary["high"]:
+        summary["high_fail_pct"] = round((summary["high_failed"] / summary["high"]) * 100)
+    if summary["medium"]:
+        summary["medium_fail_pct"] = round((summary["medium_failed"] / summary["medium"]) * 100)
+    if summary["low"]:
+        summary["low_fail_pct"] = round((summary["low_failed"] / summary["low"]) * 100)
 
     return summary
 
@@ -2781,7 +4474,29 @@ def okta_evaluate():
         logger.info("Running OktaEvaluate readiness assessment for %s.", domain)
         sections, _ = build_oktasnapshot_guide(domain, api_token)
         all_apps = get_all_applications(domain, api_token, limit=200) or []
-        result = _build_evaluate_summary(sections, domain, extra_context={"all_apps": all_apps})
+        all_users = get_users_with_security_context(domain, api_token, limit=200) or []
+        api_tokens = get_api_tokens_with_metadata(domain, api_token, limit=200) or []
+        custom_admin_roles = get_custom_admin_roles(domain, api_token, limit=200) or []
+        resource_sets = get_resource_sets(domain, api_token, limit=200) or []
+        resource_set_bindings = []
+        for resource_set in resource_sets:
+            resource_set_id = resource_set.get("id")
+            if not resource_set_id:
+                continue
+            resource_set_bindings.extend(
+                get_resource_set_bindings(domain, api_token, resource_set_id, limit=200) or []
+            )
+        result = _build_evaluate_summary(
+            sections,
+            domain,
+            extra_context={
+                "all_apps": all_apps,
+                "all_users": all_users,
+                "api_tokens": api_tokens,
+                "custom_admin_roles": custom_admin_roles,
+                "resource_set_bindings": resource_set_bindings,
+            },
+        )
         OKTAEVALUATE_EXPORT["evaluation"] = result
         return render_template(
             "okta_evaluate.html",

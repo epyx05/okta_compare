@@ -136,6 +136,12 @@
   .report-table { width:100%; border-collapse:collapse; font-size:13px; }
   .report-table th, .report-table td { border:1px solid #e5e7eb; padding:10px 12px; vertical-align:top; text-align:left; }
   .report-table th { background:#eef3ff; color:#1b2a6b; font-weight:700; }
+  .prefix-legend { margin: 0 0 14px; padding: 12px 14px; border: 1px solid #d9e2f2; border-radius: 16px; background: #f8fbff; }
+  .prefix-legend-title { margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #1b2a6b; }
+  .prefix-legend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 14px; }
+  .prefix-legend-item { display: flex; align-items: center; gap: 8px; color: #4b5563; font-size: 13px; }
+  .prefix-pill { display: inline-flex; min-width: 44px; justify-content: center; padding: 3px 8px; border-radius: 999px; background: #e5ecff; color: #1b2a6b; font-weight: 700; font-size: 12px; }
+  .check-id { white-space: nowrap; font-weight: 700; color: #1b2a6b; }
   .check-name { font-weight:700; color:#1f2937; min-width:260px; }
   .details-list { margin:0; padding-left:18px; color:#4b5563; }
   .details-list li { margin:4px 0; }
@@ -271,10 +277,22 @@
         </div>
       </div>
       <div class="page-subtitle" style="margin-bottom:10px;">This report lists what was checked, the result, and severity for each validation.</div>
+      <div class="prefix-legend">
+        <div class="prefix-legend-title">Check ID Prefix Legend</div>
+        <div class="prefix-legend-grid">
+          {% for item in evaluation.check_prefix_legend %}
+          <div class="prefix-legend-item">
+            <span class="prefix-pill">{{ item.prefix }}</span>
+            <span>{{ item.meaning }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
       <div class="report-table-wrap">
         <table class="report-table">
           <thead>
             <tr>
+              <th>Check ID</th>
               <th>What Was Checked</th>
               <th>Result</th>
               <th>Severity</th>
@@ -284,6 +302,7 @@
           <tbody>
         {% for check in evaluation.security_validations %}
             <tr>
+              <td class="check-id">{{ check.check_id or '-' }}</td>
               <td class="check-name">{{ check.title }}</td>
               <td>
                 <span class="pill {{ check.status|lower }}">{{ check.status }}</span>

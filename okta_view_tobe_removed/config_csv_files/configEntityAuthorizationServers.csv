@@ -1,2 +1,0 @@
-ID,Name,Status,Description,Audiences,Issuer,Credentials Rotation Mode
-aus4sn95bc2iGdnz23l7,default,ACTIVE,Default Authorization Server for your Applications,api://default,https://dev-cfa-apps.okta.com/oauth2/default,AUTO

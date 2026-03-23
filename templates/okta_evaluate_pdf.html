@@ -8,6 +8,8 @@
   h1 { margin: 0 0 6px; color: #0f1b3d; font-size: 24px; }
   .meta { margin: 0 0 16px; color: #4b5563; font-size: 12px; }
   .summary { margin: 0 0 16px; font-size: 12px; }
+  .legend { margin: 0 0 16px; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 10px; background: #f8fbff; font-size: 11px; }
+  .legend-title { margin: 0 0 6px; font-weight: bold; color: #1b2a6b; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: bold; margin-right: 6px; }
   .result-pass { background: #dcfce7; color: #166534; }
   .result-fail { background: #fef3c7; color: #92400e; }
@@ -25,10 +27,19 @@
   <h1>OktaEvaluate Security Validation Report</h1>
   <p class="meta">{{ evaluation.domain }}{% if evaluation.generated_at %} · Generated {{ evaluation.generated_at }}{% endif %}</p>
   <p class="summary">Readiness Score: <strong>{{ evaluation.overall_score }}</strong>{% if evaluation.readiness_band %} · Readiness Band: <strong>{{ evaluation.readiness_band }}</strong>{% endif %}</p>
+  <div class="legend">
+    <div class="legend-title">Check ID Prefix Legend</div>
+    <div>
+      {% for item in evaluation.check_prefix_legend %}
+      <span><strong>{{ item.prefix }}</strong> = {{ item.meaning }}{% if not loop.last %} · {% endif %}</span>
+      {% endfor %}
+    </div>
+  </div>
 
   <table>
     <thead>
       <tr>
+        <th>Check ID</th>
         <th>What Was Checked</th>
         <th>Result</th>
         <th>Severity</th>
@@ -38,6 +49,7 @@
     <tbody>
       {% for check in evaluation.security_validations %}
       <tr>
+        <td><strong>{{ check.check_id or '-' }}</strong></td>
         <td><strong>{{ check.title }}</strong></td>
         <td>
           <span class="badge result-{{ (check.status or '')|lower }}">{{ check.status }}</span>

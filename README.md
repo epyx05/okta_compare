@@ -259,6 +259,38 @@ Notes:
 
 The table below lists the current `OktaEvaluate` checks with stable IDs. The prefix is meaningful to the control area, and the numeric suffix is unique within that area.
 
+#### Prefix Legend
+
+| Prefix | Meaning |
+|---|---|
+| `ORG` | Organization Settings |
+| `SEC` | Security General Settings |
+| `GRP` | Groups |
+| `GRR` | Group Rules |
+| `NET` | Network Zones |
+| `AUT` | Authenticators |
+| `MFA` | Authenticator Enrollment Policies |
+| `PWD` | Password Policies |
+| `APP` | Applications and App Sign-On |
+| `SES` | Global Session Policies |
+| `POL` | Cross-policy and risk policy checks |
+| `IDP` | Identity Providers and IdP Discovery |
+| `AS` | Authorization Servers |
+| `CAR` | Custom Admin Roles |
+| `RST` | Resource Sets |
+| `ADM` | Admin Accounts and Admin Governance |
+| `GAD` | Global Admin Accounts |
+| `API` | API Tokens |
+| `BRD` | Brand Settings |
+| `TOR` | Trusted Origins |
+| `EVH` | Event Hooks |
+| `INH` | Inline Hooks |
+| `ATP` | Attack Protection |
+| `RLM` | Realms |
+| `PRF` | Profile Schema and Mappings |
+| `GPM` | Group Push Mappings |
+| `USR` | User and Service Account Risk |
+
 | Check ID | Check | Severity |
 |---|---|---|
 | `ORG-01` | Organization Support Metadata Completeness | Moderate |

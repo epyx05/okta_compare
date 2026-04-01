@@ -94,6 +94,47 @@ def _ensure_https_domain(domain):
     return domain if str(domain).startswith(("http://", "https://")) else f"https://{domain}"
 
 
+def _validate_okta_api_token(domain, api_token):
+    domain = _ensure_https_domain(domain).rstrip("/")
+    headers = {
+        "Authorization": f"SSWS {api_token}",
+        "Accept": "application/json",
+    }
+    url = f"{domain}/api/v1/org"
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+    except requests.RequestException as exc:
+        logger.warning("Upfront API token validation failed for %s: %s", domain, exc)
+        return False, "Unable to reach the Okta org. Verify the domain and try again."
+
+    if response.status_code == 200:
+        return True, ""
+
+    message = "Unable to validate the Okta API token."
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+
+    error_summary = str(payload.get("errorSummary") or "").strip()
+    if response.status_code == 401:
+        message = "The API token is invalid or expired. Provide a valid Okta API token and try again."
+    elif response.status_code == 403:
+        message = "The API token does not have sufficient admin privileges for this tool. Use an admin token with read access."
+    elif response.status_code == 404:
+        message = "The Okta domain could not be verified. Check the domain and try again."
+    elif error_summary:
+        message = f"Unable to validate the Okta API token: {error_summary}"
+
+    logger.warning(
+        "Upfront API token validation failed for %s: status=%s summary=%s",
+        domain,
+        response.status_code,
+        error_summary or response.text[:200],
+    )
+    return False, message
+
+
 def _as_dict(value):
     if isinstance(value, dict):
         return value
@@ -2875,6 +2916,22 @@ def index():
                 message="Please provide Env A and Env B domains and API tokens.",
             ), 400
 
+        env_a_valid, env_a_message = _validate_okta_api_token(envA_domain, envA_token)
+        if not env_a_valid:
+            return render_template(
+                "oktacompare_error.html",
+                title="Invalid Env A API Token",
+                message=env_a_message,
+            ), 400
+
+        env_b_valid, env_b_message = _validate_okta_api_token(envB_domain, envB_token)
+        if not env_b_valid:
+            return render_template(
+                "oktacompare_error.html",
+                title="Invalid Env B API Token",
+                message=env_b_message,
+            ), 400
+
 
         # ===================================================
         # GROUPS
@@ -4454,6 +4511,14 @@ def oktasnapshot_generate():
             message="Please provide the Okta domain and API token for OktaSnapshot.",
         ), 400
 
+    token_valid, token_message = _validate_okta_api_token(domain, api_token)
+    if not token_valid:
+        return render_template(
+            "oktacompare_error.html",
+            title="Invalid API Token",
+            message=token_message,
+        ), 400
+
     logger.info("Generating OktaSnapshot guide for %s.", domain)
     sections, export_rows = build_oktasnapshot_guide(domain, api_token)
     OKTASNAPSHOT_EXPORT["rows"] = export_rows
@@ -4648,6 +4713,14 @@ def okta_evaluate():
                 form_values={"domain": domain},
             ), 400
 
+        token_valid, token_message = _validate_okta_api_token(domain, api_token)
+        if not token_valid:
+            return render_template(
+                "okta_evaluate.html",
+                form_error=token_message,
+                form_values={"domain": domain},
+            ), 400
+
         logger.info("Running OktaEvaluate readiness assessment for %s.", domain)
         sections, _ = build_oktasnapshot_guide(domain, api_token)
         all_apps = get_all_applications(domain, api_token, limit=200) or []
@@ -4758,6 +4831,22 @@ def okta_migrate():
             return render_template(
                 "okta_migrate.html",
                 form_error="Please provide source and target domains and API tokens to generate a migration plan.",
+                form_values=request.form,
+            ), 400
+
+        source_valid, source_message = _validate_okta_api_token(source_domain, source_token)
+        if not source_valid:
+            return render_template(
+                "okta_migrate.html",
+                form_error=f"Source environment: {source_message}",
+                form_values=request.form,
+            ), 400
+
+        target_valid, target_message = _validate_okta_api_token(target_domain, target_token)
+        if not target_valid:
+            return render_template(
+                "okta_migrate.html",
+                form_error=f"Target environment: {target_message}",
                 form_values=request.form,
             ), 400
 

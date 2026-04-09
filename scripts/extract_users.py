@@ -21,7 +21,8 @@ def get_users(domain_url, api_token, limit=200, search=None):
     base = ensure_domain_str(domain_url).rstrip("/")
     url = f"{base}/api/v1/users?limit={limit}"
     if search:
-        url = f"{url}&search={quote(search, safe='()\" ')}"
+        safe_chars = '()" '
+        url = f"{url}&search={quote(search, safe=safe_chars)}"
     logger.info("Fetching users from %s.", url)
     users = get_paginated(url, _headers(api_token), "Error fetching users") or []
     if search:
